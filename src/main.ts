@@ -509,7 +509,6 @@ async function ensureGroups(isUserInitiated = false): Promise<void> {
     groups = await groupPulls(state.pulls);
     groupsSignature = signature;
     localStorage.setItem(GROUPS_CACHE_KEY, JSON.stringify({ signature, groups }));
-    if (isUserInitiated) toast(`Grouped related work into ${groups.length} group${groups.length === 1 ? '' : 's'}`);
   } catch (error) {
     if (isUserInitiated) toast(`Grouping failed: ${errorMessage(error)}`, true);
     else console.warn('background regroup failed', errorMessage(error));
@@ -527,7 +526,6 @@ function toggleGrouping(): void {
   isGrouped = !isGrouped;
   localStorage.setItem('grouped', isGrouped ? '1' : '0');
   renderList();
-  if (!isGrouped) toast('Grouping off');
   void ensureGroups(true);
 }
 

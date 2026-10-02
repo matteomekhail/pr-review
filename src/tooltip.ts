@@ -26,6 +26,8 @@ export function enableTooltips(): void {
   document.body.append(tip);
   let timer = 0;
   let current: HTMLElement | null = null;
+  // A click (which also opens native select menus) silences that element's tooltip until the pointer leaves it.
+  let suppressed: HTMLElement | null = null;
 
   const hide = (): void => {
     window.clearTimeout(timer);
@@ -88,11 +90,19 @@ export function enableTooltips(): void {
     if (target?.hasAttribute('title')) adopt(target);
     if (target === current) return;
     hide();
-    if (target == null || document.body.classList.contains('resizing')) return;
+    if (target !== suppressed) suppressed = null;
+    if (target == null || target === suppressed || document.body.classList.contains('resizing')) return;
     current = target;
     timer = window.setTimeout(() => current === target && show(target), SHOW_DELAY_MS);
   });
-  document.addEventListener('pointerdown', hide, true);
+  document.addEventListener(
+    'pointerdown',
+    (event) => {
+      hide();
+      suppressed = (event.target as HTMLElement).closest?.<HTMLElement>('[data-tip], [title]') ?? null;
+    },
+    true,
+  );
   document.addEventListener('keydown', hide, true);
   window.addEventListener('blur', hide);
   document.addEventListener('scroll', hide, true);
