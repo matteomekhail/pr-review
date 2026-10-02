@@ -2229,7 +2229,10 @@ dom.smartFilter.addEventListener('change', () => {
   setSmartFilter(dom.smartFilter.value as SmartFilter);
   dom.smartFilter.blur();
 });
-dom.sort.addEventListener('change', () => setSortOrder(dom.sort.value as SortOrder));
+dom.sort.addEventListener('change', () => {
+  setSortOrder(dom.sort.value as SortOrder);
+  dom.sort.blur();
+});
 element('bulk-ready').addEventListener('click', selectReady);
 element('bulk-unready').addEventListener('click', selectUnready);
 element('bulk-clear').addEventListener('click', clearChecked);

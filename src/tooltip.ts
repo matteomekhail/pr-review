@@ -35,9 +35,12 @@ export function enableTooltips(): void {
     current = null;
   };
 
+  // WebKit opens a native select menu without a reliable pointerdown, but the select holds focus while it is open.
+  const isOpenSelect = (target: HTMLElement): boolean => target instanceof HTMLSelectElement && document.activeElement === target;
+
   const show = (target: HTMLElement): void => {
     const text = target.dataset.tip ?? '';
-    if (text === '') return;
+    if (text === '' || isOpenSelect(target)) return;
     tip.innerHTML = renderLabel(text);
     tip.classList.add('show');
     const rect = target.getBoundingClientRect();
@@ -95,11 +98,16 @@ export function enableTooltips(): void {
     current = target;
     timer = window.setTimeout(() => current === target && show(target), SHOW_DELAY_MS);
   });
+  const suppress = (event: Event): void => {
+    hide();
+    suppressed = (event.target as HTMLElement).closest?.<HTMLElement>('[data-tip], [title]') ?? null;
+  };
+  document.addEventListener('pointerdown', suppress, true);
+  document.addEventListener('mousedown', suppress, true);
   document.addEventListener(
-    'pointerdown',
+    'focusin',
     (event) => {
-      hide();
-      suppressed = (event.target as HTMLElement).closest?.<HTMLElement>('[data-tip], [title]') ?? null;
+      if (event.target instanceof HTMLSelectElement) hide();
     },
     true,
   );
