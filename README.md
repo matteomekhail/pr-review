@@ -10,15 +10,14 @@ A fast, keyboard-first macOS app for reviewing and merging GitHub pull requests.
 
 - **Queue:** review requested, involved, and created by me, with counts.
 - **Smart filters:** Ready (green, mergeable, no changes requested), Small (≤150 lines), Recent (48h). The Smart sort ranks by readiness.
-- **Jev readiness (optional):** with `OPENROUTER_API_KEY` set, each PR is scored by [Jev](https://openrouter.ai) on review evidence, open concerns, change risk and scope, taken from its description, reviews and comments. Without a key, it falls back to the built-in rules.
+- **Jev readiness (optional):** with a TypeSafe API key, each PR is scored by [Jev](https://typesafe.ai) on review evidence, open concerns, change risk and scope, taken from its description, reviews and comments. Without a key, it falls back to the built-in rules.
 - **Diffs:** [`@pierre/diffs`](https://www.npmjs.com/package/@pierre/diffs), virtualized and syntax-highlighted in web workers. Collapsible files and sticky headers.
 - **Preview:** `P` opens the preview deployment found in bot comments or the body (for example `pr-123.preview.example.com`, Vercel, Netlify, Cloudflare Pages); the header button is disabled when there is none.
-- **Devin:** `D` opens the Devin session linked in the PR body or comments; the header button is disabled when there is none.
 - **Comments:** long comments are capped with a Show more toggle, so scrolling never gets stuck inside one. `C` opens a comment box on the current PR (drafts are kept per PR); `⌘↵` posts it through `gh`.
 - **Layout:** description on the left, diff on the right. Panes resize and hide, and `1`–`3` apply preset proportions.
 - **Smart search (Jev):** typing a topic like `frontend` or `billing` also finds PRs that don't contain the word, tagged **Jev** in the list. Literal matches still appear instantly.
 - **Smart groups (Jev):** `T` groups related PRs into efforts, such as a run of lib extractions or UI refactors. Groups are ordered by average readiness and each can be collapsed or selected as a whole for bulk merge.
-- **Conversation:** PR comments and reviews appear under the description, humans and bots alike (Devin, Perry, GitHub Actions…), with review verdicts highlighted. `⇧B` hides bot comments.
+- **Conversation:** PR comments and reviews appear under the description, humans and bots alike (review bots, GitHub Actions…), with review verdicts highlighted. `⇧B` hides bot comments.
 - **Merge queue:** PRs already in a queue show a yellow marker with their position, and queued merges skip the confirmation.
 - **Themes:** press `T` for a live-preview picker with 45 themes grouped into Dark (29) and Light (16), or follow macOS. Includes Catppuccin, Tokyo Night, Dracula, One Dark/Light, GitHub (dark, dimmed, light, high contrast), VS Code Dark+/Light+, Nord, Gruvbox, Rosé Pine (main, Moon, Dawn), Solarized, Ayu, Everforest, Kanagawa, Material, Night Owl, Monokai, Poimandres, Synthwave '84, Vitesse, Min and Vesper. Diff syntax colours use the matching editor theme.
 - **Bulk actions:** select with `E` / `⇧J` / `⇧R`, then approve or merge in sequence with per-PR error reporting.
@@ -56,7 +55,7 @@ From a checkout, `bun run install:app` does the same.
 
 - macOS, [Bun](https://bun.sh), Rust (stable), and Xcode Command Line Tools.
 - `gh` authenticated.
-- Optional: `OPENROUTER_API_KEY` in your environment or login shell for AI readiness scoring, grouping and the Tested filter.
+- Optional: a TypeSafe API key for AI readiness scoring, grouping, smart search and the Tested filter. Store it in the Keychain with `security add-generic-password -U -a "$USER" -s TYPESAFE_API_KEY -w <key>`, or export `TYPESAFE_API_KEY` in your environment or login shell.
 
 ## Develop
 
@@ -114,7 +113,7 @@ Vim motions work the same in every pane; the modifier picks the pane.
 
 ## Credits
 
-UI icons are [Lucide](https://lucide.dev) (ISC), vendored in `src/icons.ts` so nothing is fetched at runtime. The Devin mark is traced from its GitHub app avatar.
+UI icons are [Lucide](https://lucide.dev) (ISC), vendored in `src/icons.ts` so nothing is fetched at runtime.
 
 ## License
 

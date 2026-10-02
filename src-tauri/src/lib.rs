@@ -18,10 +18,10 @@ const MAX_MERGE_STATE_IDS: usize = 25;
 
 const MAX_DIFF_FALLBACK_FILES: usize = 3000;
 const GH_TIMEOUT_SECS: u64 = 45;
-const SYSTEM_ONE_URL: &str = "https://openrouter.ai/api/v1/systemone";
+const SYSTEM_ONE_URL: &str = "https://api.typesafe.ai/v1/systemone";
 const MAX_READINESS_STATE_BYTES: usize = 600_000;
 
-static OPENROUTER_KEY: OnceLock<Option<String>> = OnceLock::new();
+static TYPESAFE_KEY: OnceLock<Option<String>> = OnceLock::new();
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -266,25 +266,36 @@ async fn merge(repo: String, number: u64, method: MergeMethod, queued: bool, nod
     Ok(if output.trim().is_empty() { "Merge requested".to_string() } else { output })
 }
 
-fn resolve_openrouter_key() -> Option<String> {
-    if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
-        if !key.trim().is_empty() {
-            return Some(key.trim().to_string());
-        }
+fn usable_key(key: &str) -> Option<String> {
+    let key = key.trim();
+    (!key.is_empty() && !key.contains(char::is_whitespace)).then(|| key.to_string())
+}
+
+/// TypeSafe API key: the environment, then the macOS Keychain (service `TYPESAFE_API_KEY`), then the login shell.
+fn resolve_typesafe_key() -> Option<String> {
+    if let Some(key) = std::env::var("TYPESAFE_API_KEY").ok().as_deref().and_then(usable_key) {
+        return Some(key);
+    }
+    let keychain = std::process::Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-s", "TYPESAFE_API_KEY", "-w"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    if let Some(key) = keychain.ok().filter(|output| output.status.success()).and_then(|output| String::from_utf8(output.stdout).ok()).as_deref().and_then(usable_key) {
+        return Some(key);
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let output = std::process::Command::new(shell)
-        .args(["-l", "-i", "-c", "printf %s \"$OPENROUTER_API_KEY\""])
+        .args(["-l", "-i", "-c", "printf %s \"$TYPESAFE_API_KEY\""])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
-    let key = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    (key.starts_with("sk-") && !key.contains(char::is_whitespace)).then_some(key)
+    usable_key(&String::from_utf8(output.stdout).ok()?)
 }
 
-fn openrouter_key() -> Option<&'static str> {
-    OPENROUTER_KEY.get_or_init(resolve_openrouter_key).as_deref()
+fn typesafe_key() -> Option<&'static str> {
+    TYPESAFE_KEY.get_or_init(resolve_typesafe_key).as_deref()
 }
 
 #[tauri::command]
@@ -304,7 +315,7 @@ async fn review_context(repo: String, number: u64) -> Result<String, String> {
 
 #[tauri::command]
 async fn readiness_available() -> bool {
-    tauri::async_runtime::spawn_blocking(|| openrouter_key().is_some()).await.unwrap_or(false)
+    tauri::async_runtime::spawn_blocking(|| typesafe_key().is_some()).await.unwrap_or(false)
 }
 
 #[tauri::command]
@@ -312,15 +323,14 @@ async fn readiness(request: String) -> Result<String, String> {
     if request.len() > MAX_READINESS_STATE_BYTES {
         return Err("readiness request too large".to_string());
     }
-    let key = tauri::async_runtime::spawn_blocking(openrouter_key)
+    let key = tauri::async_runtime::spawn_blocking(typesafe_key)
         .await
         .map_err(|error| error.to_string())?
-        .ok_or("OPENROUTER_API_KEY not configured")?;
+        .ok_or("TYPESAFE_API_KEY not configured")?;
     let response = http_client()
         .post(SYSTEM_ONE_URL)
         .bearer_auth(key)
         .header("Content-Type", "application/json")
-        .header("X-Title", "PR Review")
         .body(request)
         .send()
         .await

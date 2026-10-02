@@ -471,7 +471,7 @@ async function ensureGroups(isUserInitiated = false): Promise<void> {
 
 function toggleGrouping(): void {
   if (!isAiEnabled) {
-    toast('Grouping needs OPENROUTER_API_KEY.', true);
+    toast('Grouping needs TYPESAFE_API_KEY.', true);
     return;
   }
   isGrouped = !isGrouped;
@@ -573,7 +573,7 @@ function renderList(): void {
   const sections = listSections(pulls);
   const needle = state.filter.trim().toLowerCase();
   const rows: VirtualRow[] = [];
-  const note = !isGrouped ? '' : isGrouping ? '<span class="spinner"></span>Grouping related work…' : groups.length === 0 ? 'No groups yet · press T again or run “Regroup”' : '';
+  const note = !isGrouped ? '' : isGrouping ? '<span class="spinner"></span>Grouping related work…' : groups.length === 0 ? 'No groups yet · press ⇧T again or run “Regroup”' : '';
   if (note !== '') rows.push({ key: 'status', height: STATUS_ROW_HEIGHT, render: () => `<li data-key="status" class="group-status">${note}</li>` });
   for (const section of sections) {
     const group = section.group;
@@ -867,7 +867,6 @@ function syncQueueState(pull: PullRequest): void {
 
 function renderDetail(pull: PullRequest): void {
   syncQueueState(pull);
-  void syncDevinButton(pull);
   void syncPreviewButton(pull);
   dom.crumbs.innerHTML = `<span class="repo" title="${escapeHtml(pull.repository.nameWithOwner)}">${escapeHtml(repoName(pull))}</span><span class="sep">›</span><a class="cur pr-link" href="${escapeHtml(pull.url)}" title="Open on GitHub  O">#${pull.number}</a>`;
   renderDetailMeta(pull);
@@ -1165,30 +1164,13 @@ function scheduleAiRender(): void {
     if (offset != null && after != null) dom.list.scrollTop = after - offset;
     const pull = selectedPull();
     if (pull != null) renderDetailMeta(pull);
-    renderAiStatus();
   });
-}
-
-function renderAiStatus(): void {
-  const badge = document.getElementById('ai-status');
-  if (badge == null) return;
-  if (!isAiEnabled) {
-    badge.textContent = 'Rules';
-    badge.title = 'Built-in rules · set OPENROUTER_API_KEY for smart ranking';
-    badge.className = 'ai-status off';
-    return;
-  }
-  const scored = state.pulls.filter((pull) => aiResults.has(aiKey(pull))).length;
-  badge.textContent = aiPending.size > 0 ? `AI ${scored}/${state.pulls.length}` : 'AI';
-  badge.title = 'Smart sort ranks by AI readiness';
-  badge.className = aiPending.size > 0 ? 'ai-status busy' : 'ai-status on';
 }
 
 async function scoreWithJev(pulls: PullRequest[]): Promise<void> {
   if (!isAiEnabled) return;
   const queue = pulls.filter((pull) => !pull.isDraft && !aiResults.has(aiKey(pull)) && !aiPending.has(aiKey(pull)));
   queue.forEach((pull) => aiPending.add(aiKey(pull)));
-  renderAiStatus();
   const worker = async (): Promise<void> => {
     for (let pull = queue.shift(); pull != null; pull = queue.shift()) {
       const key = aiKey(pull);
@@ -1794,28 +1776,10 @@ dom.triage.addEventListener('close', () => {
   );
 });
 
-const DEVIN_SESSION_PATTERN = /https:\/\/(?:[a-z0-9-]+\.)*(?:devin\.ai|devinenterprise\.com)\/(?:desktop\/)?sessions?\/[0-9a-f]{16,64}/i;
-
-function devinSessionUrl(html: string): string | null {
-  const match = DEVIN_SESSION_PATTERN.exec(html.replace(/&amp;/g, '&'));
-  return match == null ? null : match[0].replace('/desktop/session/', '/sessions/');
-}
-
-async function findDevinSession(pull: PullRequest): Promise<string | null> {
-  const fromBody = devinSessionUrl(await loadBody(pull).catch(() => ''));
-  if (fromBody != null) return fromBody;
-  const items = await loadConversation(pull).catch((): ConversationItem[] => []);
-  for (const item of items) {
-    const url = devinSessionUrl(item.html);
-    if (url != null) return url;
-  }
-  return null;
-}
-
 const PREVIEW_HOST_PATTERN = /(?:^|\.)(?:preview\.[a-z0-9-]+\.[a-z]{2,}|vercel\.app|netlify\.app|pages\.dev|workers\.dev|onrender\.com|fly\.dev|up\.railway\.app|herokuapp\.com|amplifyapp\.com|web\.app|firebaseapp\.com|surge\.sh|github\.io)$/i;
 const PREVIEW_WORD_PATTERN = /preview|deploy|staging/i;
 const URL_PATTERN = /https?:\/\/[^\s"'<>)\]]+/gi;
-const IGNORED_PREVIEW_HOSTS = /(?:^|\.)(?:github\.com|githubusercontent\.com|vercel\.com|netlify\.com|devin\.ai|devinenterprise\.com|datadoghq\.com|shields\.io)$/i;
+const IGNORED_PREVIEW_HOSTS = /(?:^|\.)(?:github\.com|githubusercontent\.com|vercel\.com|netlify\.com|datadoghq\.com|shields\.io)$/i;
 
 function previewUrlsIn(html: string): string[] {
   const text = html.replace(/&amp;/g, '&');
@@ -1854,29 +1818,6 @@ async function openPreview(): Promise<void> {
   }
   await openInBrowser(url).then(
     () => toast(`Opened preview for #${pull.number}`),
-    (error: unknown) => toast(errorMessage(error), true),
-  );
-}
-
-async function syncDevinButton(pull: PullRequest): Promise<void> {
-  const button = document.getElementById('open-devin') as HTMLButtonElement | null;
-  if (button == null) return;
-  const url = await findDevinSession(pull);
-  if (selectedPull()?.id !== pull.id) return;
-  button.disabled = url == null;
-  button.dataset.tip = url == null ? 'No Devin session linked on this PR' : 'Open Devin session  D';
-}
-
-async function openDevinSession(): Promise<void> {
-  const pull = selectedPull();
-  if (pull == null) return;
-  const url = await findDevinSession(pull);
-  if (url == null) {
-    toast(`No Devin session linked on #${pull.number}`, true);
-    return;
-  }
-  await openInBrowser(url).then(
-    () => toast(`Opened Devin session for #${pull.number}`),
     (error: unknown) => toast(errorMessage(error), true),
   );
 }
@@ -1998,7 +1939,6 @@ dom.commentDialog.addEventListener('cancel', (event) => {
 dom.commentSend.addEventListener('click', () => void submitComment());
 element('comment-cancel').addEventListener('click', closeCommentDialog);
 element('comment-button').addEventListener('click', openCommentDialog);
-element('open-devin').addEventListener('click', () => void openDevinSession());
 element('open-preview').addEventListener('click', () => void openPreview());
 
 function openThemePicker(): void {
@@ -2080,18 +2020,17 @@ const COMMANDS: Command[] = [
   { id: 'preview', section: 'Pull request', title: 'Open preview deployment', aliases: 'preview deploy vercel netlify cloudflare pages staging site web', keys: ['p'], run: () => void openPreview(), isEnabled: hasPull },
   { id: 'media', section: 'Navigate', title: 'Open first image / video / HTML preview', aliases: 'lightbox screenshot media picture gif recording', keys: ['i', '⌘⇧i'], run: () => openMedia(0), isEnabled: hasPull },
   { id: 'description', section: 'Navigate', title: 'Jump to description', keys: ['⌘↑'], run: () => diffView.scrollToTop(), isEnabled: hasPull },
-  { id: 'devin', section: 'Pull request', title: 'Open Devin session', aliases: 'devin agent session link', keys: ['d'], run: () => void openDevinSession(), isEnabled: hasPull },
 
   ...VIM_COMMANDS,
   ...DIFF_SCROLL_COMMANDS,
   { id: 'toggle-file', section: 'Diff', title: 'Collapse / expand file', aliases: 'fold unfold hide', keys: ['x'], run: toggleCurrentFile, isEnabled: hasFiles },
-  { id: 'toggle-bots', section: 'Pull request', title: 'Show / hide bot comments', aliases: 'devin perry github-actions automated comments conversation', keys: ['⇧b'], run: () => { showBotComments = !showBotComments; localStorage.setItem('showBotComments', showBotComments ? '1' : '0'); const pull = selectedPull(); if (pull != null) renderDetail(pull); toast(showBotComments ? 'Showing bot comments' : 'Hiding bot comments'); } },
+  { id: 'toggle-bots', section: 'Pull request', title: 'Show / hide bot comments', aliases: 'bots perry github-actions automated comments conversation', keys: ['⇧b'], run: () => { showBotComments = !showBotComments; localStorage.setItem('showBotComments', showBotComments ? '1' : '0'); const pull = selectedPull(); if (pull != null) renderDetail(pull); toast(showBotComments ? 'Showing bot comments' : 'Hiding bot comments'); } },
   { id: 'diff-style', section: 'Diff', title: 'Toggle split / unified diff', aliases: 'side by side inline view', keys: ['s', '⌘⌥s'], run: toggleStyle },
 
-  { id: 'comment', section: 'Pull request', title: 'Write a comment', aliases: 'reply message mention devin note', keys: ['c'], run: openCommentDialog, isEnabled: hasPull },
+  { id: 'comment', section: 'Pull request', title: 'Write a comment', aliases: 'reply message mention note', keys: ['c'], run: openCommentDialog, isEnabled: hasPull },
   { id: 'approve', section: 'Pull request', title: 'Approve', aliases: 'lgtm review accept', keys: ['a'], run: () => void approveSelected(), isEnabled: () => { const pull = selectedPull(); return pull != null && !isOwnPull(pull); } },
   { id: 'merge', section: 'Pull request', title: 'Merge (all selected when several are checked)', aliases: 'squash ship land queue', keys: ['⌘↵', 'm'], run: () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()), isEnabled: () => hasPull() || state.checkedIds.size > 0 },
-  { id: 'fix-prompt', section: 'Pull request', title: 'Needs attention → copy agent prompt', aliases: 'triage unapproved broken red failing ci conflict agent devin claude codex prompt clipboard review', keys: ['⇧x'], run: openTriage },
+  { id: 'fix-prompt', section: 'Pull request', title: 'Needs attention → copy agent prompt', aliases: 'triage unapproved broken red failing ci conflict agent claude codex prompt clipboard review', keys: ['⇧x'], run: openTriage },
   { id: 'open', section: 'Pull request', title: 'Open on GitHub', aliases: 'browser link url web', keys: ['o', '⌘o', 'g o'], run: openSelectedOnGitHub, isEnabled: hasPull },
   { id: 'copy-url', section: 'Pull request', title: 'Copy link', keys: ['⌘⇧c', 'y'], run: () => { const pull = selectedPull(); if (pull != null) copyText(pull.url, 'link'); }, isEnabled: hasPull },
   { id: 'copy-branch', section: 'Pull request', title: 'Copy branch name', keys: ['⌘⇧.', 'b'], run: () => { const pull = selectedPull(); if (pull != null) copyText(pull.headRefName, 'branch'); }, isEnabled: hasPull },
@@ -2207,6 +2146,7 @@ element('open-help').addEventListener('click', openHelp);
 element('open-github').addEventListener('click', openSelectedOnGitHub);
 element('refresh-button').addEventListener('click', manualRefresh);
 element('open-triage').addEventListener('click', openTriage);
+element('toggle-grouping').addEventListener('click', toggleGrouping);
 element('list-empty').addEventListener('click', (event) => {
   const action = (event.target as HTMLElement).closest<HTMLElement>('[data-empty-action]')?.dataset.emptyAction;
   if (action === 'clear-filter') {
@@ -2258,7 +2198,6 @@ void fetchViewerLogin().then((login) => {
 
 void isReadinessAvailable().then((isAvailable) => {
   isAiEnabled = isAvailable;
-  renderAiStatus();
   if (isAvailable) void scoreWithJev(state.pulls);
   if (isAvailable) void ensureGroups();
 });

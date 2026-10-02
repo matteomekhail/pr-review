@@ -262,12 +262,6 @@ input, textarea, .description .markdown, .description h1, diffs-container { -web
 a, button, select, [role=checkbox], .chip, .file, #pr-list li { cursor: default; }
 img { -webkit-user-drag: none; }
 
-.ai-status { margin-left: auto; height: 20px; flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border-radius: 5px; font-size: 11px; font-weight: 600; color: var(--text-4); border: 1px solid var(--border); white-space: nowrap; }
-.ai-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--text-4); }
-.ai-status.on { color: #aab1f0; border-color: #33386b; }
-.ai-status.on::before { background: var(--accent); }
-.ai-status.busy { color: #aab1f0; border-color: #33386b; }
-.ai-status.busy::before { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .25; } }
 .sort { margin-left: 4px; }
 .ai-score { font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 22px; text-align: center; border-radius: 4px; padding: 1px 3px; }
@@ -347,8 +341,6 @@ img { -webkit-user-drag: none; }
 
 .filter-bar .sort { flex: none; max-width: 86px; }
 #list-pane.narrow .chip-count { display: none; }
-#list-pane.narrow .ai-status { padding: 0 5px; font-size: 0; gap: 0; }
-#list-pane.narrow .ai-status::before { margin: 0; }
 
 .split-button select[hidden] { display: none; }
 .split-button select[hidden] ~ *, .split-button:has(select[hidden]) button.primary { border-radius: var(--radius); }
@@ -436,7 +428,6 @@ img { -webkit-user-drag: none; }
 
 .filter-bar { gap: 4px; }
 #toggle-grouping { flex: none; order: -1; }
-.filter-bar .ai-status { margin-left: 0; }
 .filter-bar .sort { margin-left: auto; }
 
 .head-title { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 auto; overflow: hidden; }
@@ -820,7 +811,6 @@ kbd[data-glyph='right'] { --kbd-glyph: url("data:image/svg+xml,%3Csvg%20xmlns%3D
 .caret { display: inline-grid; place-items: center; width: 14px; height: 14px; }
 .caret .ico { width: 13px; height: 13px; stroke-width: 2.25; }
 #pr-list li.group-row .caret { width: 14px; }
-.devin-logo { width: 15px; height: 15px; }
 .empty-pending { display: inline-flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 12.5px; animation: fade-in .2s var(--ease-out); }
 
 /* List empty / searching states */
