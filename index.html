@@ -11,7 +11,6 @@
       <section id="list-pane">
         <header class="pane-head drag-region" data-tauri-drag-region>
           <div class="head-title" data-tauri-drag-region>
-            <img class="logo" src="/favicon.png" alt="" data-tauri-drag-region />
             <h2 id="view-title" class="sr-only">Created by me</h2>
             <nav class="views view-pills h-scroll">
               <button data-kind="mine" class="active" title="Created by me  ⌘3">Mine <span class="count" data-count="mine"></span></button>
@@ -25,12 +24,20 @@
           </div>
         </header>
         <div class="filter-bar h-scroll" id="filter-bar">
-          <button id="toggle-grouping" class="chip" title="Group related work  ⇧T"><i data-icon="group"></i>Group <kbd>⇧</kbd><kbd>T</kbd></button>
-          <button id="open-triage" class="chip chip-agent" title="Copy an agent prompt to fix every PR that needs attention  ⇧X"><i data-icon="sparkles"></i>Fix <kbd>⇧</kbd><kbd>X</kbd></button>
+          <button id="toggle-grouping" class="chip" title="Group related work  ⇧T"><i data-icon="group"></i>Group</button>
+          <button id="open-triage" class="chip chip-agent" title="Copy an agent prompt to fix every PR that needs attention  ⇧X"><i data-icon="sparkles"></i>Fix</button>
           <span class="chip-sep"></span>
-          <button data-smart="all" class="chip active" title="Show all  ⌥0">All <span class="chip-count" data-smart-count="all"></span></button>
-          <button data-smart="ready" class="chip" title="Ready: green, mergeable, no changes requested  ⌥1"><i class="dot ok"></i>Ready <span class="chip-count" data-smart-count="ready"></span></button>
-          <button data-smart="attention" class="chip chip-attention" title="Show unready PRs  ⌥4 · select them all  ⇧U"><i class="dot bad"></i>Unready <span class="chip-count" data-smart-count="attention"></span></button>
+          <select id="repo-filter" class="sort filter-select" title="Filter by repository">
+            <option value="">All repos</option>
+          </select>
+          <select id="smart-filter" class="sort filter-select" title="Filter  ⌥0–⌥5">
+            <option value="all" data-label="All">All</option>
+            <option value="ready" data-label="Ready">Ready</option>
+            <option value="attention" data-label="Unready">Unready</option>
+            <option value="small" data-label="Small">Small</option>
+            <option value="recent" data-label="Recent">Recent</option>
+            <option value="tested" data-label="Tested">Tested</option>
+          </select>
           <select id="sort" class="sort" title="Sort order  ⇧S">
             <option value="smart">Smart</option>
             <option value="updated">Updated</option>

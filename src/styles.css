@@ -52,7 +52,6 @@ i.del, .del { color: var(--del); font-style: normal; }
 
 #sidebar { background: var(--bg); display: flex; flex-direction: column; padding: 0 8px 10px; -webkit-app-region: drag; }
 .workspace { display: flex; align-items: center; gap: 8px; padding: 10px 8px 12px; color: var(--text); font-weight: 600; font-size: 13px; }
-.logo { width: 24px; height: 24px; margin: -3px -2px -3px -3px; }
 .views { display: grid; gap: 1px; -webkit-app-region: no-drag; }
 .views button { display: flex; align-items: center; gap: 9px; height: 28px; padding: 0 8px; border: 0; background: none; border-radius: var(--radius); color: var(--text-2); font-weight: 500; text-align: left; }
 .views button:hover { background: var(--bg-hover); }
@@ -428,7 +427,10 @@ img { -webkit-user-drag: none; }
 
 .filter-bar { gap: 4px; }
 #toggle-grouping { flex: none; order: -1; }
-.filter-bar .sort { margin-left: auto; }
+.filter-bar #sort { margin-left: auto; }
+.filter-bar .filter-select { max-width: none; }
+.filter-bar #repo-filter { max-width: 170px; }
+.filter-select.active { color: var(--text); background: var(--bg-active); }
 
 .head-title { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 auto; overflow: hidden; }
 .head-title .refresh-button { flex: none; }
@@ -528,7 +530,6 @@ button, .chip, .file, #pr-list li { touch-action: manipulation; }
 .icon-kbd { margin: 0; padding: 1px 4px; font-size: 10px; min-width: 0; }
 .search kbd { flex: none; }
 .chip .dot.bad { background: var(--bad); }
-.chip-attention.active { border-color: rgb(235 87 87 / .45); }
 .chip-agent { color: var(--text-2); gap: 5px; }
 .chip-agent svg { color: var(--wait); }
 .chip-agent kbd { margin: 0; padding: 1px 4px; font-size: 10px; min-width: 0; }
@@ -600,7 +601,6 @@ diffs-container { --diffs-dark-bg: var(--bg); --diffs-light-bg: var(--bg); }
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 #list-pane .pane-head .head-title { gap: 6px; min-width: 0; flex: 1; }
-#list-pane .pane-head .logo { width: 20px; height: 20px; margin: 0 2px 0 0; flex: none; border-radius: 5px; }
 .view-pills { display: flex; gap: 2px; min-width: 0; flex: 0 1 auto; -webkit-app-region: no-drag; }
 .view-pills button { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border: 0; border-radius: 999px; background: none; color: var(--text-3); font-size: 12px; font-weight: 500; white-space: nowrap; }
 .view-pills button:hover { background: var(--bg-hover); color: var(--text-2); }

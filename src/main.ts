@@ -30,6 +30,7 @@ interface State {
   pulls: PullRequest[];
   filter: string;
   smartFilter: SmartFilter;
+  repoFilter: string;
   sortOrder: SortOrder;
   checkedIds: Set<string>;
   selectedId: string | null;
@@ -73,7 +74,8 @@ const dom = {
   help: element<HTMLDialogElement>('help'),
   shortcutList: element('shortcut-list'),
   sort: element<HTMLSelectElement>('sort'),
-  filterBar: element('filter-bar'),
+  smartFilter: element<HTMLSelectElement>('smart-filter'),
+  repoFilter: element<HTMLSelectElement>('repo-filter'),
   bulkBar: element('bulk-bar'),
   bulkCount: element('bulk-count'),
   bulkMerge: element<HTMLButtonElement>('bulk-merge'),
@@ -98,7 +100,8 @@ const state: State = {
   kind: 'mine',
   pulls: [],
   filter: '',
-  smartFilter: ((['all', 'ready', 'attention'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
+  smartFilter: ((['all', 'ready', 'attention', 'small', 'recent', 'tested'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
+  repoFilter: localStorage.getItem('repoFilter') ?? '',
   sortOrder: (localStorage.getItem('sortOrder') as SortOrder | null) ?? 'smart',
   checkedIds: new Set<string>(),
   selectedId: null,
@@ -281,7 +284,7 @@ function invalidateList(): void {
 }
 
 function currentListKey(): string {
-  return [listVersion, leaving.size, state.pulls, state.filter, state.smartFilter, state.sortOrder, isGrouped, groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
+  return [listVersion, leaving.size, state.pulls, state.filter, state.smartFilter, state.repoFilter, state.sortOrder, isGrouped, groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
 }
 
 const objectIds = new WeakMap<object, number>();
@@ -302,15 +305,20 @@ function withLeaving(ranked: PullRequest[]): PullRequest[] {
   return [...ranked, ...[...leaving.values()].filter((entry) => !present.has(entry.pull.id)).map((entry) => entry.pull)];
 }
 
+/** The current queue narrowed to the chosen repository, before any other filter. */
+function repoPulls(): PullRequest[] {
+  return state.repoFilter === '' ? state.pulls : state.pulls.filter((pull) => pull.repository.nameWithOwner === state.repoFilter);
+}
+
 function computeLists(): void {
   const key = currentListKey();
   if (key === listCacheKey) return;
   listCacheKey = key;
   const needle = state.filter.trim().toLowerCase();
   const now = Date.now();
-  const matching = state.pulls.filter((pull) => (state.smartFilter === 'attention' ? isMergeStateSettled(pull) && needsAttention(pull) : state.smartFilter === 'tested' ? isTested(pull) : matchesSmartFilter(pull, state.smartFilter, now)) && matchesText(pull, needle));
+  const matching = repoPulls().filter((pull) => (state.smartFilter === 'attention' ? isMergeStateSettled(pull) && needsAttention(pull) : state.smartFilter === 'tested' ? isTested(pull) : matchesSmartFilter(pull, state.smartFilter, now)) && matchesText(pull, needle));
   const ranked = sortPulls(matching, state.sortOrder, now, aiScoreFor);
-  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.smartFilter, state.sortOrder, needle, isGrouped].join('|'));
+  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.repoFilter, state.smartFilter, state.sortOrder, needle, isGrouped].join('|'));
   visibleCache = !isGrouped || groups.length === 0 ? filteredCache : listSections(filteredCache).flatMap((section) => (section.group != null && collapsedGroups.has(section.group.id) ? [] : section.pulls));
 }
 
@@ -324,25 +332,67 @@ function visiblePulls(): PullRequest[] {
   return visibleCache;
 }
 
+const measureContext = document.createElement('canvas').getContext('2d');
+const SELECT_CHROME_PX = 30;
+
+/** Native selects size to their longest option; size them to the chosen one instead. */
+function fitSelectWidth(select: HTMLSelectElement): void {
+  if (measureContext == null) return;
+  const style = getComputedStyle(select);
+  measureContext.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const text = select.selectedOptions[0]?.textContent ?? '';
+  select.style.width = `${Math.ceil(measureContext.measureText(text).width) + SELECT_CHROME_PX}px`;
+}
+
+
 let smartCountsSource: PullRequest[] | null = null;
 let lastStatesVersion = -1;
+let lastRepoFilter: string | null = null;
 
 function renderSmartCounts(): void {
-  if (smartCountsSource === state.pulls && lastStatesVersion === listVersion && dom.sort.value === state.sortOrder && dom.filterBar.querySelector('.chip.active')?.getAttribute('data-smart') === state.smartFilter) return;
+  if (smartCountsSource === state.pulls && lastStatesVersion === listVersion && lastRepoFilter === state.repoFilter && dom.sort.value === state.sortOrder && dom.smartFilter.value === state.smartFilter) return;
   smartCountsSource = state.pulls;
   lastStatesVersion = listVersion;
+  lastRepoFilter = state.repoFilter;
+  renderRepoOptions();
+  const pulls = repoPulls();
   const now = Date.now();
   const counts: Record<SmartFilter, number> = {
-    all: state.pulls.length,
-    ready: state.pulls.filter(isReady).length,
-    small: state.pulls.filter(isSmall).length,
-    recent: state.pulls.filter((pull) => isRecent(pull, now)).length,
-    attention: state.pulls.filter((pull) => isMergeStateSettled(pull) && needsAttention(pull)).length,
-    tested: state.pulls.filter(isTested).length,
+    all: pulls.length,
+    ready: pulls.filter(isReady).length,
+    small: pulls.filter(isSmall).length,
+    recent: pulls.filter((pull) => isRecent(pull, now)).length,
+    attention: pulls.filter((pull) => isMergeStateSettled(pull) && needsAttention(pull)).length,
+    tested: pulls.filter(isTested).length,
   };
-  dom.filterBar.querySelectorAll<HTMLElement>('[data-smart-count]').forEach((badge) => (badge.textContent = String(counts[badge.dataset.smartCount as SmartFilter])));
-  dom.filterBar.querySelectorAll<HTMLElement>('[data-smart]').forEach((chip) => chip.classList.toggle('active', chip.dataset.smart === state.smartFilter));
+  for (const option of dom.smartFilter.options) option.textContent = `${option.dataset.label ?? option.value} · ${counts[option.value as SmartFilter]}`;
+  dom.smartFilter.value = state.smartFilter;
+  dom.smartFilter.classList.toggle('active', state.smartFilter !== 'all');
   dom.sort.value = state.sortOrder;
+  fitSelectWidth(dom.smartFilter);
+  fitSelectWidth(dom.sort);
+}
+
+/** Repositories in the current queue, busiest first; the chosen one stays listed even when it has no PRs here. */
+function renderRepoOptions(): void {
+  const counts = new Map<string, number>();
+  state.pulls.forEach((pull) => counts.set(pull.repository.nameWithOwner, (counts.get(pull.repository.nameWithOwner) ?? 0) + 1));
+  if (state.repoFilter !== '' && !counts.has(state.repoFilter)) counts.set(state.repoFilter, 0);
+  const repos = [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  const shortNames = repos.map(([repo]) => repo.split('/')[1] ?? repo);
+  const label = (repo: string, index: number): string => (shortNames.filter((name) => name === shortNames[index]).length > 1 ? repo : (shortNames[index] ?? repo));
+  dom.repoFilter.innerHTML = `<option value="">All repos</option>${repos.map(([repo, count], index) => `<option value="${escapeHtml(repo)}" title="${escapeHtml(repo)}">${escapeHtml(label(repo, index))} · ${count}</option>`).join('')}`;
+  dom.repoFilter.value = state.repoFilter;
+  dom.repoFilter.classList.toggle('active', state.repoFilter !== '');
+  fitSelectWidth(dom.repoFilter);
+}
+
+function setRepoFilter(repo: string): void {
+  state.repoFilter = repo;
+  localStorage.setItem('repoFilter', repo);
+  renderList();
+  const first = visiblePulls()[0];
+  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
 }
 
 let pullIndexSource: PullRequest[] | null = null;
@@ -553,14 +603,18 @@ function renderListEmpty(count: number, needle: string): void {
   const isSearching = needle !== '' && isSemanticLoading;
   const isAwaiting = count === 0 && state.pulls.length > 0 && isAwaitingMergeStates();
   const kind = count > 0 || isBooting ? '' : isSearching ? 'searching' : isAwaiting ? 'checking' : state.pulls.length === 0 ? 'empty' : needle !== '' ? 'no-results' : 'filtered';
-  if (box.dataset.kind === kind) return;
-  box.dataset.kind = kind;
   const filterLabel = state.smartFilter === 'ready' ? 'Ready' : state.smartFilter === 'attention' ? 'Unready' : state.smartFilter;
+  const repoLabel = state.repoFilter.split('/')[1] ?? state.repoFilter;
+  const signature = [kind, filterLabel, repoLabel, needle].join('|');
+  if (box.dataset.signature === signature) return;
+  box.dataset.kind = kind;
+  box.dataset.signature = signature;
+  const filteredTitle = repoLabel === '' ? `Nothing is ${escapeHtml(filterLabel)} right now` : state.smartFilter === 'all' ? `No pull requests in ${escapeHtml(repoLabel)} here` : `Nothing in ${escapeHtml(repoLabel)} is ${escapeHtml(filterLabel)} right now`;
   const views: Record<string, string> = {
     searching: `${icon('search', 'empty-ico')}<b>Searching…</b><span>Looking for “${escapeHtml(needle)}”</span><div class="empty-skel"><span></span><span></span><span></span></div>`,
     checking: `<div class="empty-overlay"><b>Checking merge status…</b><span>Asking GitHub which PRs are ready to merge</span></div>`,
     'no-results': `${icon('search', 'empty-ico')}<b>No pull requests match “${escapeHtml(needle)}”</b><span>Try another word, or clear the filter</span><button type="button" class="ghost" data-empty-action="clear-filter">Clear filter <kbd>esc</kbd></button>`,
-    filtered: `${icon('circleCheck', 'empty-ico')}<b>Nothing is ${escapeHtml(filterLabel)} right now</b><span>Everything else is still in All</span><button type="button" class="ghost" data-empty-action="show-all">Show all <kbd>⌥</kbd><kbd>0</kbd></button>`,
+    filtered: `${icon('circleCheck', 'empty-ico')}<b>${filteredTitle}</b><span>Everything else is still in All</span><button type="button" class="ghost" data-empty-action="show-all">Show all <kbd>⌥</kbd><kbd>0</kbd></button>`,
     empty: `${icon('circleCheck', 'empty-ico')}<b>Inbox zero</b><span>No open pull requests in this view</span>`,
   };
   box.innerHTML = kind === '' ? '' : kind === 'checking' ? `<div class="list-checking">${listSkeleton()}${views[kind]}</div>` : `<div class="list-empty-inner">${views[kind]}</div>`;
@@ -2152,7 +2206,10 @@ element('list-empty').addEventListener('click', (event) => {
   if (action === 'clear-filter') {
     dom.filter.value = '';
     dom.filter.dispatchEvent(new Event('input', { bubbles: true }));
-  } else if (action === 'show-all') setSmartFilter('all');
+  } else if (action === 'show-all') {
+    if (state.repoFilter !== '') setRepoFilter('');
+    if (state.smartFilter !== 'all') setSmartFilter('all');
+  }
 });
 document.querySelectorAll<HTMLElement>('.h-scroll').forEach(attachScrollFade);
 animateDialogCancel();
@@ -2171,9 +2228,13 @@ applyTheme();
 enableTooltips();
 routeLinksToBrowser(openInBrowser, (message) => toast(message, true));
 systemDark.addEventListener('change', () => themeId === SYSTEM_THEME_ID && applyTheme());
-dom.filterBar.addEventListener('click', (event) => {
-  const chip = (event.target as HTMLElement).closest<HTMLElement>('[data-smart]');
-  if (chip != null) setSmartFilter(chip.dataset.smart as SmartFilter);
+dom.repoFilter.addEventListener('change', () => {
+  setRepoFilter(dom.repoFilter.value);
+  dom.repoFilter.blur();
+});
+dom.smartFilter.addEventListener('change', () => {
+  setSmartFilter(dom.smartFilter.value as SmartFilter);
+  dom.smartFilter.blur();
 });
 dom.sort.addEventListener('change', () => setSortOrder(dom.sort.value as SortOrder));
 element('bulk-ready').addEventListener('click', selectReady);
