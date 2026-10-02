@@ -334,6 +334,15 @@ function withLeaving(ranked: PullRequest[]): PullRequest[] {
   return [...ranked, ...[...leaving.values()].filter((entry) => !present.has(entry.pull.id)).map((entry) => entry.pull)];
 }
 
+/** The repository and smart filters, shared by the list and the tab counts; text search is left to the list. */
+function matchesFilters(pull: PullRequest, now: number): boolean {
+  if (state.repoFilter !== '' && pull.repository.nameWithOwner !== state.repoFilter) return false;
+  if (state.smartFilter === 'waiting') return turnFor(pull)?.whose === 'theirs';
+  if (state.smartFilter === 'attention') return isMergeStateSettled(pull) && needsAttention(pull);
+  if (state.smartFilter === 'tested') return isTested(pull);
+  return matchesSmartFilter(pull, state.smartFilter, now);
+}
+
 /** The current queue narrowed to the chosen repository, before any other filter. */
 function repoPulls(): PullRequest[] {
   return state.repoFilter === '' ? state.pulls : state.pulls.filter((pull) => pull.repository.nameWithOwner === state.repoFilter);
@@ -345,7 +354,7 @@ function computeLists(): void {
   listCacheKey = key;
   const needle = state.filter.trim().toLowerCase();
   const now = Date.now();
-  const matching = repoPulls().filter((pull) => (state.smartFilter === 'waiting' ? turnFor(pull)?.whose === 'theirs' : state.smartFilter === 'attention' ? isMergeStateSettled(pull) && needsAttention(pull) : state.smartFilter === 'tested' ? isTested(pull) : matchesSmartFilter(pull, state.smartFilter, now)) && matchesText(pull, needle));
+  const matching = state.pulls.filter((pull) => matchesFilters(pull, now) && matchesText(pull, needle));
   const ranked = sortPulls(matching, state.sortOrder, now, aiScoreFor);
   filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.repoFilter, state.smartFilter, state.sortOrder, needle, isGrouped].join('|'));
   visibleCache = !isGrouped || groups.length === 0 ? filteredCache : listSections(filteredCache).flatMap((section) => (section.group != null && collapsedGroups.has(section.group.id) ? [] : section.pulls));
@@ -498,10 +507,12 @@ function repoTag(pull: PullRequest, primaryRepo: string | undefined): string {
   return `<span class="repo-tag">${escapeHtml(repoName(pull).replace(/^terraform-provider-/, 'tf-'))}</span>`;
 }
 
+/** Each tab counts what it would show under the current repository and smart filters. */
 function renderCounts(): void {
+  const now = Date.now();
   document.querySelectorAll<HTMLElement>('[data-count]').forEach((badge) => {
     const pulls = queueCache.get(badge.dataset.count as QueueKind);
-    badge.textContent = pulls == null ? '' : String(pulls.length);
+    badge.textContent = pulls == null ? '' : String(pulls.filter((pull) => matchesFilters(pull, now)).length);
   });
 }
 
