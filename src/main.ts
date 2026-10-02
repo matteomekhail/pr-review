@@ -639,7 +639,13 @@ function renderList(): void {
   virtualList.setRows(rows);
   renderListEmpty(pulls.length, needle);
   virtualList.highlightKey(pulls.some((pull) => pull.id === state.selectedId) ? state.selectedId : null);
-  document.getElementById('toggle-grouping')?.classList.toggle('active', isGrouped);
+  const groupButton = document.getElementById('toggle-grouping');
+  if (groupButton != null) {
+    groupButton.classList.toggle('active', isGrouped);
+    const label = groupButton.querySelector('.chip-label');
+    if (label != null) label.textContent = isGrouped ? 'Ungroup' : 'Group';
+    groupButton.dataset.tip = `${isGrouped ? 'Ungroup' : 'Group related work'}  ⇧T`;
+  }
   renderCounts();
   renderSmartCounts();
   renderBulkBar();
@@ -1295,25 +1301,15 @@ const MIN_REFRESH_GAP_MS = 20_000;
 let refreshTicker: number | undefined;
 
 function renderRefreshStatus(): void {
-  const status = document.getElementById('refresh-status');
   const button = document.getElementById('refresh-button');
   const isLoading = inFlight.has(state.kind);
   button?.classList.toggle('spinning', isLoading);
   document.getElementById('list-pane')?.classList.toggle('loading', isLoading);
-  status?.classList.toggle('active', isLoading);
-  if (status == null) return;
-  if (isLoading) {
-    status.textContent = 'Refreshing…';
-    return;
-  }
+  if (button == null) return;
   const at = lastFetchedAt.get(state.kind);
-  if (at == null) {
-    status.textContent = '';
-    return;
-  }
-  const seconds = Math.round((Date.now() - at) / 1000);
-  status.textContent = seconds < 10 ? 'Just now' : seconds < 60 ? `${seconds}s ago` : `${Math.round(seconds / 60)}m ago`;
-  status.title = `Last refreshed ${new Date(at).toLocaleTimeString()}`;
+  const seconds = at == null ? null : Math.round((Date.now() - at) / 1000);
+  const age = seconds == null ? '' : seconds < 10 ? ' · updated just now' : seconds < 60 ? ` · updated ${seconds}s ago` : ` · updated ${Math.round(seconds / 60)}m ago`;
+  button.dataset.tip = isLoading ? 'Refreshing…' : `Refresh${age}  ⌘R`;
 }
 
 function summarizeChange(before: PullRequest[], after: PullRequest[]): string {
@@ -1339,7 +1335,6 @@ function manualRefresh(): void {
     toast('Already refreshing…');
     return;
   }
-  toast('Refreshing pull requests…');
   const pending = refresh(kind, true);
   renderRefreshStatus();
   void pending.then(() => {
