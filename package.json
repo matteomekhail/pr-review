@@ -1,0 +1,33 @@
+{
+  "name": "pr-review",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "tauri": "tauri",
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit",
+    "app": "tauri build --bundles app",
+    "install:app": "bash scripts/install.sh",
+    "check": "bash bench/check.sh",
+    "bench": "bun bench/run.ts",
+    "bench:noise": "bun bench/run.ts --self-test",
+    "model": "bun bench/model.ts",
+    "climb": "bash bench/climb.sh",
+    "screenshot": "bun bench/screenshot.ts"
+  },
+  "dependencies": {
+    "@pierre/diffs": "1.5.1",
+    "@tauri-apps/api": "2.12",
+    "@tauri-apps/plugin-process": "2",
+    "@tauri-apps/plugin-updater": "2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12",
+    "fast-check": "4.10.2",
+    "playwright-core": "1.63.0",
+    "typescript": "5.9.3",
+    "vite": "7"
+  }
+}

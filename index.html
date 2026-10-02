@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PR Review</title>
+    <link rel="icon" href="/favicon.png" />
+  </head>
+  <body>
+    <div id="app">
+      <section id="list-pane">
+        <header class="pane-head drag-region" data-tauri-drag-region>
+          <div class="head-title" data-tauri-drag-region>
+            <img class="logo" src="/favicon.png" alt="" data-tauri-drag-region />
+            <h2 id="view-title" class="sr-only">Created by me</h2>
+            <nav class="views view-pills h-scroll">
+              <button data-kind="mine" class="active" title="Created by me  ⌘3">Mine <span class="count" data-count="mine"></span></button>
+              <button data-kind="review" title="Review requested  ⌘1">Review <span class="count" data-count="review"></span></button>
+              <button data-kind="involved" title="Involved  ⌘2">Involved <span class="count" data-count="involved"></span></button>
+            </nav>
+            <button id="refresh-button" class="icon-button refresh-button" title="Refresh  ⌘R"><i data-icon="refresh"></i></button>
+            <span id="refresh-status" class="refresh-status"></span>
+            <button id="update-pill" class="update-pill" hidden title="Restart to update  ⌘⇧U"><i data-icon="refresh"></i>Update</button>
+            <button id="open-help" class="icon-button" title="Keyboard shortcuts  ?"><i data-icon="keyboard"></i></button>
+          </div>
+        </header>
+        <div class="filter-bar h-scroll" id="filter-bar">
+          <button id="toggle-grouping" class="chip" title="Group related work  ⇧T"><i data-icon="group"></i>Group <kbd>⇧</kbd><kbd>T</kbd></button>
+          <button id="open-triage" class="chip chip-agent" title="Copy an agent prompt to fix every PR that needs attention  ⇧X"><i data-icon="sparkles"></i>Fix <kbd>⇧</kbd><kbd>X</kbd></button>
+          <span class="chip-sep"></span>
+          <button data-smart="all" class="chip active" title="Show all  ⌥0">All <span class="chip-count" data-smart-count="all"></span></button>
+          <button data-smart="ready" class="chip" title="Ready: green, mergeable, no changes requested  ⌥1"><i class="dot ok"></i>Ready <span class="chip-count" data-smart-count="ready"></span></button>
+          <button data-smart="attention" class="chip chip-attention" title="Show unready PRs  ⌥4 · select them all  ⇧U"><i class="dot bad"></i>Unready <span class="chip-count" data-smart-count="attention"></span></button>
+          <span id="ai-status" class="ai-status off" title="Smart sort uses built-in rules">Rules</span>
+          <select id="sort" class="sort" title="Sort order  ⇧S">
+            <option value="smart">Smart</option>
+            <option value="updated">Updated</option>
+            <option value="size">Smallest</option>
+          </select>
+        </div>
+        <ol id="pr-list"></ol>
+        <div id="list-empty" class="list-empty" hidden></div>
+        <div id="list-skeleton" class="list-skeleton" aria-hidden="true"></div>
+        <div id="bulk-bar" hidden>
+          <span id="bulk-count"></span>
+          <button id="bulk-ready" class="ghost" title="Select every Ready PR  ⇧R">Ready <kbd>⇧</kbd><kbd>R</kbd></button>
+          <button id="bulk-unready" class="ghost" title="Select every PR that needs attention  ⇧U">Unready <kbd>⇧</kbd><kbd>U</kbd></button>
+          <button id="bulk-clear" class="ghost" title="Clear selection  Esc or ⌫">Clear <kbd>⌫</kbd></button>
+          <button id="bulk-approve" class="ghost" title="Approve selected  ⇧A">Approve <kbd>⇧</kbd><kbd>A</kbd></button>
+          <button id="bulk-merge" class="primary" title="Merge selected  ⌘↵">Merge <kbd>⌘</kbd><kbd>↵</kbd></button>
+        </div>
+      </section>
+      <div class="resizer" data-resize="list" title="Drag to resize · double-click to reset"></div>
+
+      <main id="detail">
+        <div id="empty" class="empty is-loading" data-tauri-drag-region><div class="boot-skeleton" aria-label="Loading pull requests" aria-busy="true"></div></div>
+        <section id="pr" hidden>
+          <header id="pr-head" class="drag-region" data-tauri-drag-region>
+            <div class="head-left" data-tauri-drag-region>
+              <button class="icon-button" id="toggle-sidebar" title="Toggle PR list  ⌘B" aria-keyshortcuts="Meta+B"><i data-icon="panel"></i><kbd class="icon-kbd">⌘B</kbd>
+              </button>
+              <div class="crumbs" id="crumbs" data-tauri-drag-region></div>
+            </div>
+            <div class="actions">
+              <button id="theme-button" class="ghost icon-action theme-button" title="Theme  T"><i data-icon="theme"></i><kbd class="icon-kbd">T</kbd></button>
+              <div class="search"><i data-icon="search"></i><input id="filter" title="Filter pull requests  /" placeholder="Filter" spellcheck="false" autocomplete="off" /><kbd>/</kbd></div>
+              <button id="comment-button" class="ghost icon-action" title="Write a comment  C"><i data-icon="comment"></i><kbd class="icon-kbd">C</kbd></button>
+              <button id="approve" class="ghost icon-action" title="Approve  A"><i data-icon="check"></i><kbd class="icon-kbd">A</kbd></button>
+              <button id="merge" class="primary merge-icon" title="Squash and merge  ⌘↵"></button>
+              <button class="ghost icon-action" id="open-preview" title="Open preview deployment  P" disabled><i data-icon="preview"></i><kbd class="icon-kbd">P</kbd></button>
+              <button class="ghost icon-action" id="open-devin" title="Open Devin session  D" disabled><svg class="devin-logo" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M5.9 1.6 8.3 3v2.8L5.9 7.2 3.5 5.8V3zM11.1 4.6l2.4 1.4v2.8l-2.4 1.4-2.4-1.4V6zM5.9 8.8l2.4 1.4V13l-2.4 1.4L3.5 13v-2.8z"/><path d="M8.2 5.7 8.9 6.2M8.2 10.3 8.9 9.8" stroke="currentColor" stroke-width="1.2"/></svg><kbd class="icon-kbd">D</kbd></button>
+              <button class="ghost icon-action" id="open-github" title="Open on GitHub  O"><i data-icon="github"></i><kbd>O</kbd></button>
+            </div>
+          </header>
+          <div id="status-bar" class="status-bar h-scroll" data-tauri-drag-region></div>
+          <div id="pr-body-split">
+            <div id="desc-pane"></div>
+            <div class="resizer" data-resize="description" title="Drag to resize · double-click to reset"></div>
+            <div id="diff-root"></div>
+            <div class="resizer" data-resize="inspector" title="Drag to resize · double-click to reset"></div>
+            <aside id="inspector">
+              <nav id="files" hidden></nav><span id="file-count" hidden></span>
+            </aside>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" role="status"></div>
+
+    <dialog id="comment-dialog">
+      <form method="dialog">
+        <div class="dialog-title" id="comment-title">Comment</div>
+        <textarea id="comment-body" rows="6" placeholder="Leave a comment… (markdown, @mentions work)" spellcheck="true"></textarea>
+        <div class="comment-hint muted" id="comment-hint"></div>
+        <menu>
+          <button value="cancel" class="ghost" type="button" id="comment-cancel">Cancel <kbd>esc</kbd></button>
+          <button value="send" class="primary" type="button" id="comment-send">Comment <kbd>⌘</kbd><kbd>↵</kbd></button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="confirm">
+      <form method="dialog">
+        <div class="dialog-title" id="confirm-title"></div>
+        <p id="confirm-text"></p>
+        <menu>
+          <button value="cancel" class="ghost">Cancel <kbd>esc</kbd></button>
+          <button value="ok" class="primary" autofocus>Merge <kbd>↵</kbd></button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="bulk-confirm">
+      <form method="dialog">
+        <div class="dialog-title" id="bulk-confirm-title"></div>
+        <ol id="bulk-confirm-list" class="bulk-list"></ol>
+        <p class="muted" id="bulk-confirm-note"></p>
+        <menu>
+          <button value="cancel" class="ghost">Cancel <kbd>esc</kbd></button>
+          <button value="ok" class="primary" autofocus>Merge all <kbd>↵</kbd></button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="triage">
+      <form method="dialog">
+        <div class="dialog-title" id="triage-title"></div>
+        <p class="muted triage-sub">Everything that is conflicted, failing, blocked or not approved. Untick a group to leave it out, then paste the prompt into Codex, Claude or Devin.</p>
+        <div id="triage-sections" class="triage-sections"></div>
+        <menu>
+          <button value="cancel" class="ghost">Cancel <kbd>esc</kbd></button>
+          <button value="copy" id="triage-copy" class="primary">Copy prompt <kbd>↵</kbd></button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="help">
+      <form method="dialog">
+        <div class="dialog-title">Keyboard shortcuts</div>
+        <div id="shortcut-list" class="shortcut-list"></div>
+        <menu><button value="close" class="ghost">Close <kbd>esc</kbd></button></menu>
+      </form>
+    </dialog>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

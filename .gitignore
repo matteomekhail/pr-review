@@ -1,0 +1,14 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.bun-cache/
+.bun-tmp/
+.cargo-home/
+.preview/
+.DS_Store
+*.log
+bench/dist
+.bench-check.log
+bench/dist-base
+bench/.base-src
