@@ -25,6 +25,7 @@ import { invalidateConversation, loadConversation, type ConversationItem } from 
 import { isReady, isRecent, isSmall, matchesSmartFilter, sortPulls, type SmartFilter, type SortOrder } from './smart';
 import { assessReadiness, isReadinessAvailable, type ReadinessResult } from './readiness';
 import { computeTurn, type Turn } from './turn';
+import { botReviews, describeBotReview } from './review-bots';
 
 interface State {
   kind: QueueKind;
@@ -623,6 +624,16 @@ const GROUP_ROW_HEIGHT = 34;
 const STATUS_ROW_HEIGHT = 34;
 const virtualList = new VirtualList(dom.list);
 
+/** One fixed column per AI reviewer (Claude, then Greptile) beside the author avatar; empty when it has not touched the PR. */
+function botMarks(pull: PullRequest): string {
+  const marks = botReviews(pull).map((review) => {
+    if (review == null) return '<span class="bot-mark"></span>';
+    const label = describeBotReview(review, (iso) => `${relativeTime(iso)} ago`);
+    return `<span class="bot-mark ${review.state}${review.isOutdated ? ' outdated' : ''}" title="${escapeHtml(label)}"><img src="${escapeHtml(review.avatarUrl)}&s=32" alt="" loading="lazy" /></span>`;
+  });
+  return `<span class="bot-marks">${marks.join('')}</span>`;
+}
+
 function waitingLabel(turn: Extract<Turn, { whose: 'theirs' }>): string {
   return `Waiting on ${turn.waitingOn.map((name) => `@${name}`).join(', ')}`;
 }
@@ -643,7 +654,7 @@ function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: str
         ${statusIcon(pull)}
         <span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">${repoTag(pull, primaryRepo)}#${pull.number}</span>
         <span class="t">${escapeHtml(pull.title)}</span>
-        <span class="right">${pull.queueEntry != null ? `<span class="queue-pill" title="${escapeHtml(queueLabel(pull))}">Queued</span>` : ''}${readinessDot(pull)}${checksIcon(pull)}<span class="delta"><i class="add">+${pull.additions}</i> <i class="del">−${pull.deletions}</i></span>${turnMarker(pull)}<span class="age">${relativeTime(pull.updatedAt)}</span>${avatar(pull)}</span>
+        <span class="right">${pull.queueEntry != null ? `<span class="queue-pill" title="${escapeHtml(queueLabel(pull))}">Queued</span>` : ''}${readinessDot(pull)}${checksIcon(pull)}<span class="delta"><i class="add">+${pull.additions}</i> <i class="del">−${pull.deletions}</i></span>${turnMarker(pull)}<span class="age">${relativeTime(pull.updatedAt)}</span>${botMarks(pull)}${avatar(pull)}</span>
       </li>`;
 }
 

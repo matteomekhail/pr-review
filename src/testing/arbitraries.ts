@@ -30,7 +30,7 @@ export const pullArbitrary: fc.Arbitrary<PullRequest> = fc.record({
   baseRefName: 'main',
   author: { login: 'author', avatarUrl: '' },
   repository: { nameWithOwner: repo },
-  activity: { lastCommitAt: null, reviewRequests: [], reviews: [], comments: [] },
+  activity: { lastCommitAt: null, reviewRequests: [], reviews: [], comments: [], checks: [] },
 }));
 
 export const pullListArbitrary: fc.Arbitrary<PullRequest[]> = fc.uniqueArray(pullArbitrary, { maxLength: 150, selector: (pull) => pull.url });

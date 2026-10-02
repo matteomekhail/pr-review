@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { isReviewBotCheck } from './review-bots';
 
 /** A GitHub search behind a queue. */
 export type SearchKind = 'review' | 'mine' | 'involved' | 'reviewed';
@@ -22,6 +23,8 @@ export interface PullActivity {
   reviewRequests: { name: string; isTeam: boolean }[];
   reviews: { state: ReviewState; at: string; author: Actor }[];
   comments: { at: string; author: Actor }[];
+  /** Check runs on the head commit that belong to review bots (see review-bots.ts). */
+  checks: { name: string; status: string; conclusion: string | null }[];
 }
 
 export interface PullRequest {
@@ -61,7 +64,7 @@ interface RawAuthor {
 
 interface RawPullRequest extends Omit<PullRequest, 'checkState' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'activity'> {
   mergeQueueEntry: { position: number; state: string } | null;
-  commits: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: CheckState } | null } }[] };
+  commits: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: CheckState; contexts?: { nodes: { name?: string; status?: string; conclusion?: string | null }[] } } | null } }[] };
   reviewRequests?: { nodes: { requestedReviewer: { __typename: string; login?: string; name?: string } | null }[] };
   reviews?: { nodes: { state: ReviewState; submittedAt: string | null; author: RawAuthor | null }[] };
   comments?: { nodes: { createdAt: string; author: RawAuthor | null }[] };
@@ -89,6 +92,7 @@ function toActivity({ commits, reviewRequests, reviews, comments }: RawPullReque
     }),
     reviews: (reviews?.nodes ?? []).flatMap((review) => (review.author == null || review.submittedAt == null ? [] : [{ state: review.state, at: review.submittedAt, author: toActor(review.author) }])),
     comments: (comments?.nodes ?? []).flatMap((comment) => (comment.author == null ? [] : [{ at: comment.createdAt, author: toActor(comment.author) }])),
+    checks: (commits.nodes[0]?.commit.statusCheckRollup?.contexts?.nodes ?? []).flatMap((check) => (check.name == null || check.status == null || !isReviewBotCheck(check.name) ? [] : [{ name: check.name, status: check.status, conclusion: check.conclusion ?? null }])),
   };
 }
 

@@ -11,7 +11,7 @@ const QUEUE_FIELDS: &str = r#"
   mergeQueueEntry { position state }
   author { login avatarUrl }
   repository { nameWithOwner }
-  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state } } } }
+  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } } } } } } }
   reviewRequests(first: 5) { nodes { requestedReviewer { __typename ... on User { login avatarUrl } ... on Team { name } } } }
   reviews(last: 20) { nodes { state submittedAt author { login avatarUrl __typename } } }
   comments(last: 20) { nodes { createdAt author { login avatarUrl __typename } } }
