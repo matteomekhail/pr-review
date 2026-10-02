@@ -1994,6 +1994,11 @@ function openThemePicker(): void {
 
 function syncPaneButtons(): void {
   document.getElementById('toggle-sidebar')?.classList.toggle('on', !layout.isHidden('list'));
+  const fullscreen = document.getElementById('toggle-fullscreen');
+  if (fullscreen != null) {
+    fullscreen.classList.toggle('on', layout.isFocused());
+    fullscreen.dataset.tip = `${layout.isFocused() ? 'Exit fullscreen diff' : 'Fullscreen diff'}  F`;
+  }
 }
 
 function openHelp(): void {
@@ -2052,7 +2057,7 @@ const COMMANDS: Command[] = [
   { id: 'layout-review', section: 'Layout', title: 'Layout: review (list 24% · description 36% · diff)', aliases: 'preset pane default balanced', keys: ['1', '⌘⌥1'], run: () => applyLayoutPreset('review') },
   { id: 'layout-diff', section: 'Layout', title: 'Layout: diff focus (list minimal · description 26% · diff)', aliases: 'preset pane code wide', keys: ['2', '⌘⌥2'], run: () => applyLayoutPreset('diff') },
   { id: 'layout-read', section: 'Layout', title: 'Layout: read description (list minimal · description 62% · diff)', aliases: 'preset pane body middle', keys: ['3', '⌘⌥3'], run: () => applyLayoutPreset('read') },
-  { id: 'focus-mode', section: 'Layout', title: 'Focus mode (hide all panels)', aliases: 'zen fullscreen hide panes', keys: ['⌘.', 'z'], run: () => layout.toggleFocus() },
+  { id: 'focus-mode', section: 'Layout', title: 'Fullscreen diff (hide list and description)', aliases: 'zen focus maximize expand hide panes', keys: ['f', '⌘.', 'z'], run: () => layout.toggleFocus() },
   { id: 'theme', section: 'Layout', title: 'Choose theme', aliases: 'light dark mode appearance color catppuccin dracula tokyo night nord gruvbox github solarized monokai rose pine one dark', keys: ['t', '⌘⇧l'], run: openThemePicker },
   { id: 'reset-layout', section: 'Layout', title: 'Reset layout', aliases: 'panes widths default', keys: ['⌘⇧0'], run: () => layout.reset() },
 
@@ -2189,6 +2194,7 @@ dom.filter.addEventListener('input', () => {
   scheduleSemanticSearch();
 });
 element('toggle-sidebar').addEventListener('click', () => layout.toggle('list'));
+element('toggle-fullscreen').addEventListener('click', () => layout.toggleFocus());
 element('open-help').addEventListener('click', openHelp);
 element('open-github').addEventListener('click', openSelectedOnGitHub);
 element('refresh-button').addEventListener('click', manualRefresh);

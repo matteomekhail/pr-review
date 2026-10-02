@@ -207,6 +207,8 @@ body.resizing diffs-container { pointer-events: none; }
 .icon-button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: var(--radius); background: none; color: var(--text-4); flex: none; }
 .icon-button:hover { background: var(--bg-hover); color: var(--text-2); }
 .icon-button.on { color: var(--text-3); }
+#toggle-fullscreen .when-on, #toggle-fullscreen.on .when-off { display: none; }
+#toggle-fullscreen.on .when-on { display: block; }
 
 
 #help { width: 560px; max-height: 80vh; overflow-y: auto; }

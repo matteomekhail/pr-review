@@ -24,6 +24,8 @@ const PANES: Record<PaneId, PaneSpec> = {
 };
 
 const PANE_IDS = Object.keys(PANES) as PaneId[];
+/** Hidden together for a fullscreen diff; the diff itself lives in the inspector. */
+const FOCUS_PANES = ['list', 'description'] as const;
 
 function defaultState(): LayoutState {
   return {
@@ -55,6 +57,7 @@ export class Layout {
   private state = loadState();
   private readonly root: HTMLElement;
   private readonly onChange: () => void;
+  private beforeFocus: Record<(typeof FOCUS_PANES)[number], boolean> | null = null;
 
   constructor(root: HTMLElement, onChange: () => void) {
     this.root = root;
@@ -69,7 +72,7 @@ export class Layout {
   }
 
   isFocused(): boolean {
-    return (['list', 'inspector'] as const).every((pane) => this.state.hidden[pane]);
+    return FOCUS_PANES.every((pane) => this.state.hidden[pane]);
   }
 
   toggle(pane: PaneId): void {
@@ -77,9 +80,16 @@ export class Layout {
     this.commit();
   }
 
+  /** Fullscreen diff: hide the list and description, then restore exactly what was showing before. */
   toggleFocus(): void {
-    const shouldHide = !this.isFocused();
-    (['list', 'inspector'] as const).forEach((pane) => (this.state.hidden[pane] = shouldHide));
+    if (this.isFocused()) {
+      const restore = this.beforeFocus ?? { list: false, description: false };
+      FOCUS_PANES.forEach((pane) => (this.state.hidden[pane] = restore[pane]));
+      this.beforeFocus = null;
+    } else {
+      this.beforeFocus = { list: this.state.hidden.list, description: this.state.hidden.description };
+      FOCUS_PANES.forEach((pane) => (this.state.hidden[pane] = true));
+    }
     this.commit();
   }
 

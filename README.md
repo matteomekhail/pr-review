@@ -14,7 +14,7 @@ A fast, keyboard-first macOS app for reviewing and merging GitHub pull requests.
 - **Diffs:** [`@pierre/diffs`](https://www.npmjs.com/package/@pierre/diffs), virtualized and syntax-highlighted in web workers. Collapsible files and sticky headers.
 - **Preview:** `P` opens the preview deployment found in bot comments or the body (for example `pr-123.preview.example.com`, Vercel, Netlify, Cloudflare Pages); the header button is disabled when there is none.
 - **Comments:** long comments are capped with a Show more toggle, so scrolling never gets stuck inside one. `C` opens a comment box on the current PR (drafts are kept per PR); `⌘↵` posts it through `gh`.
-- **Layout:** description on the left, diff on the right. Panes resize and hide, and `1`–`3` apply preset proportions.
+- **Layout:** description on the left, diff on the right. Panes resize and hide, `1`–`3` apply preset proportions, and `F` (or the header button) shows the diff fullscreen.
 - **Smart search (Jev):** typing a topic like `frontend` or `billing` also finds PRs that don't contain the word, tagged **Jev** in the list. Literal matches still appear instantly.
 - **Smart groups (Jev):** `T` groups related PRs into efforts, such as a run of lib extractions or UI refactors. Groups are ordered by average readiness and each can be collapsed or selected as a whole for bulk merge.
 - **Conversation:** PR comments and reviews appear under the description, humans and bots alike (review bots, GitHub Actions…), with review verdicts highlighted. `⇧B` hides bot comments.
@@ -107,7 +107,7 @@ Vim motions work the same in every pane; the modifier picks the pane.
 | Filters | `⇧T` group related work · `⌥1` Ready · `⌥4` Unready · `⌥0` All (Small `⌥2`, Recent `⌥3`, Tested `⌥5`) · `⇧S` sort · `⇧X` fix with agent · `⇧U` select unready · `⇧R` select ready |
 | Select | `⇧V` visual mode (then `J`/`K`) · `E` toggle · `⇧J`/`⇧K` extend · `⇧R` all ready · `⇧U` all unready · `⌘A` all · `⌫` or `Esc` clear |
 | Act | `⇧X` copy an agent prompt to fix every PR with conflicts or failing checks (or just the selected ones) · `O` open on GitHub (in Chrome) · `A` approve · `⌘↵` merge (all selected when several are checked) · `⇧A` bulk approve · `⌘↵` bulk merge |
-| Layout | `T` theme picker · `⌘B` PR list · `1` review · `2` diff focus · `3` read description · `⌘.` focus |
+| Layout | `T` theme picker · `⌘B` PR list · `1` review · `2` diff focus · `3` read description · `F` / `⌘.` fullscreen diff |
 | Lightbox | `I` open first media · `H`/`L` or `J`/`K` or `←`/`→` cycle · `gg`/`G` first/last · `⌃D`/`⌃U` skip half · `Z` zoom · `O` open · `Q`/`Esc` close |
 | General | `/` filter · `?` shortcuts · `R` refresh |
 
