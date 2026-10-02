@@ -101,10 +101,14 @@ fn search_query(kind: QueueKind) -> &'static str {
     }
 }
 
+/// PRs per search page. GitHub aborts GraphQL queries after about 10s; with review activity and check runs per PR,
+/// a 100-PR page runs past that, while 25 stays near 4s (and costs 1 point).
+const QUEUE_PAGE_SIZE: u32 = 25;
+
 #[tauri::command]
 async fn queue(kind: QueueKind) -> Result<String, String> {
     let query = format!(
-        "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: 100, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_FIELDS} }} }} }}"
+        "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {QUEUE_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_FIELDS} }} }} }}"
     );
     gh(&["api", "graphql", "--paginate", "--slurp", "-f", &format!("query={query}"), "-f", &format!("q={}", search_query(kind))]).await
 }
