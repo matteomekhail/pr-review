@@ -686,7 +686,10 @@ button.primary, #pr-head .actions button { transition: background-color .12s lin
 .chip-sep { flex: none; width: 1px; height: 14px; background: var(--border); margin: 0 3px; }
 .filter-bar .chip kbd { margin: 0; padding: 0 3px; font-size: 9.5px; min-width: 0; line-height: 14px; }
 .filter-bar .chip kbd + kbd { margin-left: -3px; }
-#toggle-grouping { order: 0; }
+#toggle-grouping { order: 0; padding: 0 10px; }
+/* Reserve room for the longest label so toggling Group/Ungroup never shifts the bar. */
+.chip-label[data-reserve] { display: inline-grid; }
+.chip-label[data-reserve]::after { content: attr(data-reserve); height: 0; overflow: hidden; visibility: hidden; }
 
 @keyframes rise-in { from { opacity: 0; transform: translate3d(0, 8px, 0) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes sink-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translate3d(0, 6px, 0) scale(.98); } }
