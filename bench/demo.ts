@@ -1,6 +1,7 @@
 import type { FixturePull } from './fixtures';
 
 export const DEMO_NOW = Date.parse('2026-09-28T09:00:00Z');
+export const DEMO_VIEWER = 'jordan-lee';
 
 interface DemoSpec {
   title: string;
@@ -54,7 +55,11 @@ export const DEMO_PULLS: FixturePull[] = SPECS.map((spec, index) => {
     mergeQueueEntry: spec.queued == null ? null : { position: spec.queued - 1, state: 'AWAITING_CHECKS' },
     author: { login: 'sam-rivera', avatarUrl: '' },
     repository: { nameWithOwner: spec.repo },
-    commits: { nodes: [{ commit: { statusCheckRollup: { state: spec.checks } } }] },
+    commits: { nodes: [{ commit: { committedDate: new Date(DEMO_NOW - (index % 6 === 1 ? spec.hoursAgo : spec.hoursAgo + 20) * 3_600_000).toISOString(), statusCheckRollup: { state: spec.checks } } }] },
+    // Turn demo: every third PR asks the viewer for a review; another third was reviewed by the viewer, half of those updated since.
+    reviewRequests: { nodes: index % 3 === 0 ? [{ requestedReviewer: { __typename: 'User', login: DEMO_VIEWER } }] : [] },
+    reviews: { nodes: index % 3 === 1 ? [{ state: 'CHANGES_REQUESTED', submittedAt: new Date(DEMO_NOW - (spec.hoursAgo + 2) * 3_600_000).toISOString(), author: { login: DEMO_VIEWER, avatarUrl: '', __typename: 'User' } }] : [] },
+    comments: { nodes: [] },
   };
 });
 

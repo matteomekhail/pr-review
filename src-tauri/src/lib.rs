@@ -11,7 +11,10 @@ const QUEUE_FIELDS: &str = r#"
   mergeQueueEntry { position state }
   author { login avatarUrl }
   repository { nameWithOwner }
-  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state } } } }
+  reviewRequests(first: 5) { nodes { requestedReviewer { __typename ... on User { login avatarUrl } ... on Team { name } } } }
+  reviews(last: 20) { nodes { state submittedAt author { login avatarUrl __typename } } }
+  comments(last: 20) { nodes { createdAt author { login avatarUrl __typename } } }
 }"#;
 
 const MAX_MERGE_STATE_IDS: usize = 25;
@@ -29,6 +32,7 @@ enum QueueKind {
     Review,
     Mine,
     Involved,
+    Reviewed,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -93,6 +97,7 @@ fn search_query(kind: QueueKind) -> &'static str {
         QueueKind::Review => "is:pr is:open archived:false review-requested:@me sort:updated-desc",
         QueueKind::Mine => "is:pr is:open archived:false author:@me sort:updated-desc",
         QueueKind::Involved => "is:pr is:open archived:false involves:@me sort:updated-desc",
+        QueueKind::Reviewed => "is:pr is:open archived:false reviewed-by:@me -author:@me sort:updated-desc",
     }
 }
 

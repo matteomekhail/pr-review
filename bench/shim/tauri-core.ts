@@ -1,4 +1,4 @@
-import { DEMO_CONFLICTS, DEMO_PULLS, demoBody, demoConversation, demoDiff } from '../demo';
+import { DEMO_CONFLICTS, DEMO_PULLS, DEMO_VIEWER, demoBody, demoConversation, demoDiff } from '../demo';
 import { generateBody, generateDiff, generatePulls, type FixturePull } from '../fixtures';
 
 const COUNT = Number(new URLSearchParams(location.search).get('pulls') ?? 120);
@@ -18,8 +18,16 @@ function mergeStateOf(pull: FixturePull): { id: string; mergeable: string; merge
   return { id: pull.id, mergeable: conflicted ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: status };
 }
 
+/** In the demo, the review searches only return what GitHub would; every other queue shows all fixtures. */
+function queueFor(kind: string): FixturePull[] {
+  if (!IS_DEMO) return pulls;
+  if (kind === 'review') return pulls.filter((pull) => pull.reviewRequests?.nodes.some((node) => node.requestedReviewer?.login === DEMO_VIEWER));
+  if (kind === 'reviewed') return pulls.filter((pull) => pull.reviews?.nodes.some((review) => review.author.login === DEMO_VIEWER));
+  return pulls;
+}
+
 const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
-  queue: () => JSON.stringify([{ data: { search: { nodes: pulls } } }]),
+  queue: (args) => JSON.stringify([{ data: { search: { nodes: queueFor(args.kind as string) } } }]),
   merge_states: (args) => JSON.stringify({ data: { nodes: (args.ids as string[]).map((id) => byId.get(id)).filter((pull) => pull != null).map((pull) => mergeStateOf(pull as FixturePull)) } }),
   body: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; return IS_DEMO ? demoBody(pull) : generateBody(pull); },
   diff: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; return (IS_DEMO ? demoDiff(pull) : null) ?? generateDiff(pull); },
@@ -28,7 +36,7 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     { id: 'c3', bodyHTML: '<h3>🚀 Web Preview Deployed</h3><p><a href="https://pr-47520.preview.acme.dev">https://pr-47520.preview.acme.dev</a></p>', createdAt: '2026-09-26T11:30:00Z', url: 'https://github.com/o/web/pull/1#c3', author: { login: 'github-actions', avatarUrl: '', __typename: 'Bot' } },
     { id: 'c2', bodyHTML: '<p>Tracking issue: <a href="https://github.com/acme/web/issues/4801">acme/web#4801</a></p>', createdAt: '2026-09-26T11:00:00Z', url: 'https://github.com/o/web/pull/1#c2', author: { login: 'ci-helper', avatarUrl: '', __typename: 'Bot' } },
   ] }, reviews: { totalCount: 0, nodes: [] } } } } }),
-  viewer: () => (IS_DEMO ? 'jordan-lee' : 'someone-else'),
+  viewer: () => (IS_DEMO ? DEMO_VIEWER : 'someone-else'),
   comment: (args) => `https://github.com/${String(args.repo)}/pull/${String(args.number)}#issuecomment-1`,
   merge_queue: () => JSON.stringify({ data: { repository: { mergeQueue: null } } }),
   readiness_available: () => false,

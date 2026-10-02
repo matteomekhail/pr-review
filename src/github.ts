@@ -1,9 +1,28 @@
 import { invoke } from '@tauri-apps/api/core';
 
-export type QueueKind = 'review' | 'mine' | 'involved';
+/** A GitHub search behind a queue. */
+export type SearchKind = 'review' | 'mine' | 'involved' | 'reviewed';
+/** A tab: one search, or `turn`, which is derived from several. */
+export type QueueKind = Exclude<SearchKind, 'reviewed'> | 'turn';
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
 export type MergeableState = 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
 export type CheckState = 'SUCCESS' | 'FAILURE' | 'ERROR' | 'PENDING' | 'EXPECTED';
+
+export type ReviewState = 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING';
+
+export interface Actor {
+  login: string;
+  avatarUrl: string;
+  isBot: boolean;
+}
+
+/** Recent review-loop activity, used to work out whose turn it is. */
+export interface PullActivity {
+  lastCommitAt: string | null;
+  reviewRequests: { name: string; isTeam: boolean }[];
+  reviews: { state: ReviewState; at: string; author: Actor }[];
+  comments: { at: string; author: Actor }[];
+}
 
 export interface PullRequest {
   id: string;
@@ -25,6 +44,7 @@ export interface PullRequest {
   repository: { nameWithOwner: string };
   checkState: CheckState | null;
   queueEntry: { position: number; state: string } | null;
+  activity: PullActivity;
 }
 
 export interface MergeState {
@@ -33,9 +53,18 @@ export interface MergeState {
   mergeStateStatus: string;
 }
 
-interface RawPullRequest extends Omit<PullRequest, 'checkState' | 'mergeable' | 'mergeStateStatus' | 'queueEntry'> {
+interface RawAuthor {
+  login: string;
+  avatarUrl: string;
+  __typename?: string;
+}
+
+interface RawPullRequest extends Omit<PullRequest, 'checkState' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'activity'> {
   mergeQueueEntry: { position: number; state: string } | null;
-  commits: { nodes: { commit: { statusCheckRollup: { state: CheckState } | null } }[] };
+  commits: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: CheckState } | null } }[] };
+  reviewRequests?: { nodes: { requestedReviewer: { __typename: string; login?: string; name?: string } | null }[] };
+  reviews?: { nodes: { state: ReviewState; submittedAt: string | null; author: RawAuthor | null }[] };
+  comments?: { nodes: { createdAt: string; author: RawAuthor | null }[] };
 }
 
 interface QueuePage {
@@ -47,8 +76,25 @@ function isPullRequest(node: RawPullRequest | Record<string, never>): node is Ra
   return typeof node.number === 'number';
 }
 
-function toPullRequest({ commits, mergeQueueEntry, ...pull }: RawPullRequest): PullRequest {
-  return { ...pull, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: commits.nodes[0]?.commit.statusCheckRollup?.state ?? null };
+function toActor(author: RawAuthor): Actor {
+  return { login: author.login, avatarUrl: author.avatarUrl, isBot: author.__typename === 'Bot' || author.login.endsWith('[bot]') };
+}
+
+function toActivity({ commits, reviewRequests, reviews, comments }: RawPullRequest): PullActivity {
+  return {
+    lastCommitAt: commits.nodes[0]?.commit.committedDate ?? null,
+    reviewRequests: (reviewRequests?.nodes ?? []).flatMap(({ requestedReviewer: reviewer }) => {
+      const name = reviewer?.login ?? reviewer?.name;
+      return name == null ? [] : [{ name, isTeam: reviewer?.__typename === 'Team' }];
+    }),
+    reviews: (reviews?.nodes ?? []).flatMap((review) => (review.author == null || review.submittedAt == null ? [] : [{ state: review.state, at: review.submittedAt, author: toActor(review.author) }])),
+    comments: (comments?.nodes ?? []).flatMap((comment) => (comment.author == null ? [] : [{ at: comment.createdAt, author: toActor(comment.author) }])),
+  };
+}
+
+function toPullRequest(raw: RawPullRequest): PullRequest {
+  const { commits, mergeQueueEntry, reviewRequests: _requests, reviews: _reviews, comments: _comments, ...pull } = raw;
+  return { ...pull, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: commits.nodes[0]?.commit.statusCheckRollup?.state ?? null, activity: toActivity(raw) };
 }
 
 const MERGE_STATE_BATCH = 20;
@@ -71,7 +117,7 @@ export async function fetchMergeStates(ids: readonly string[], onBatch: (states:
   if (failure != null) throw failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
 }
 
-export async function fetchQueue(kind: QueueKind): Promise<PullRequest[]> {
+export async function fetchQueue(kind: SearchKind): Promise<PullRequest[]> {
   const parsed: QueuePage | QueuePage[] = JSON.parse(await invoke<string>('queue', { kind }));
   const pages = Array.isArray(parsed) ? parsed : [parsed];
   const failed = pages.find((page) => page.data == null);

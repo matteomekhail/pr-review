@@ -24,6 +24,7 @@ import { VirtualList, type VirtualRow } from './virtual-list';
 import { invalidateConversation, loadConversation, type ConversationItem } from './conversation';
 import { isReady, isRecent, isSmall, matchesSmartFilter, sortPulls, type SmartFilter, type SortOrder } from './smart';
 import { assessReadiness, isReadinessAvailable, type ReadinessResult } from './readiness';
+import { computeTurn, type Turn } from './turn';
 
 interface State {
   kind: QueueKind;
@@ -41,7 +42,7 @@ interface State {
 const PREFETCH_AHEAD = 5;
 const DIFF_CACHE_LIMIT = 24;
 const QUEUE_REFRESH_MS = 120_000;
-const VIEW_TITLES: Record<QueueKind, string> = { review: 'Review requested', involved: 'Involved', mine: 'Created by me' };
+const VIEW_TITLES: Record<QueueKind, string> = { turn: 'My turn', review: 'Review requested', involved: 'Involved', mine: 'Created by me' };
 const MERGE_LABELS: Record<MergeMethod, string> = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' };
 
 const element = <T extends HTMLElement>(id: string): T => {
@@ -100,7 +101,7 @@ const state: State = {
   kind: 'mine',
   pulls: [],
   filter: '',
-  smartFilter: ((['all', 'ready', 'attention', 'small', 'recent', 'tested'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
+  smartFilter: ((['all', 'ready', 'attention', 'waiting', 'small', 'recent', 'tested'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
   repoFilter: localStorage.getItem('repoFilter') ?? '',
   sortOrder: (localStorage.getItem('sortOrder') as SortOrder | null) ?? 'smart',
   checkedIds: new Set<string>(),
@@ -283,6 +284,34 @@ function invalidateList(): void {
   listVersion += 1;
 }
 
+/** PRs whose review GitHub says is requested from me, including through a team. */
+let reviewRequestedIds = new Set<string>();
+let turnCache = new WeakMap<PullRequest, Turn | null>();
+
+function turnFor(pull: PullRequest): Turn | null {
+  if (turnCache.has(pull)) return turnCache.get(pull) ?? null;
+  const turn = computeTurn(pull, viewer, reviewRequestedIds.has(pull.id));
+  turnCache.set(pull, turn);
+  return turn;
+}
+
+function resetTurns(): void {
+  turnCache = new WeakMap();
+  invalidateList();
+  renderList();
+}
+
+/** My turn: my PRs, review requests and PRs I reviewed, kept where the next move is mine. */
+async function fetchTurnQueue(): Promise<PullRequest[]> {
+  const [login, mine, review, reviewed] = await Promise.all([fetchViewerLogin(), fetchQueue('mine'), fetchQueue('review'), fetchQueue('reviewed')]);
+  const requested = new Set(review.map((pull) => pull.id));
+  reviewRequestedIds = requested;
+  turnCache = new WeakMap();
+  invalidateList();
+  const seen = new Set<string>();
+  return [...review, ...mine, ...reviewed].filter((pull) => !seen.has(pull.id) && seen.add(pull.id) != null && computeTurn(pull, login, requested.has(pull.id))?.whose === 'mine');
+}
+
 function currentListKey(): string {
   return [listVersion, leaving.size, state.pulls, state.filter, state.smartFilter, state.repoFilter, state.sortOrder, isGrouped, groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
 }
@@ -316,7 +345,7 @@ function computeLists(): void {
   listCacheKey = key;
   const needle = state.filter.trim().toLowerCase();
   const now = Date.now();
-  const matching = repoPulls().filter((pull) => (state.smartFilter === 'attention' ? isMergeStateSettled(pull) && needsAttention(pull) : state.smartFilter === 'tested' ? isTested(pull) : matchesSmartFilter(pull, state.smartFilter, now)) && matchesText(pull, needle));
+  const matching = repoPulls().filter((pull) => (state.smartFilter === 'waiting' ? turnFor(pull)?.whose === 'theirs' : state.smartFilter === 'attention' ? isMergeStateSettled(pull) && needsAttention(pull) : state.smartFilter === 'tested' ? isTested(pull) : matchesSmartFilter(pull, state.smartFilter, now)) && matchesText(pull, needle));
   const ranked = sortPulls(matching, state.sortOrder, now, aiScoreFor);
   filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.repoFilter, state.smartFilter, state.sortOrder, needle, isGrouped].join('|'));
   visibleCache = !isGrouped || groups.length === 0 ? filteredCache : listSections(filteredCache).flatMap((section) => (section.group != null && collapsedGroups.has(section.group.id) ? [] : section.pulls));
@@ -364,6 +393,7 @@ function renderSmartCounts(): void {
     recent: pulls.filter((pull) => isRecent(pull, now)).length,
     attention: pulls.filter((pull) => isMergeStateSettled(pull) && needsAttention(pull)).length,
     tested: pulls.filter(isTested).length,
+    waiting: pulls.filter((pull) => turnFor(pull)?.whose === 'theirs').length,
   };
   for (const option of dom.smartFilter.options) option.textContent = `${option.dataset.label ?? option.value} · ${counts[option.value as SmartFilter]}`;
   dom.smartFilter.value = state.smartFilter;
@@ -582,6 +612,18 @@ const GROUP_ROW_HEIGHT = 34;
 const STATUS_ROW_HEIGHT = 34;
 const virtualList = new VirtualList(dom.list);
 
+function waitingLabel(turn: Extract<Turn, { whose: 'theirs' }>): string {
+  return `Waiting on ${turn.waitingOn.map((name) => `@${name}`).join(', ')}`;
+}
+
+/** A fixed-width slot, empty when nobody has a turn, so rows stay aligned. */
+function turnMarker(pull: PullRequest): string {
+  const turn = turnFor(pull);
+  if (turn == null) return '<span class="turn"></span>';
+  if (turn.whose === 'mine') return `<span class="turn mine" title="Your turn · ${escapeHtml(turn.reason)}"></span>`;
+  return `<span class="turn theirs" title="${escapeHtml(waitingLabel(turn))}">${icon('hourglass')}</span>`;
+}
+
 function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: string): string {
   const isChecked = state.checkedIds.has(pull.id);
   const exit = leaving.get(pull.id);
@@ -590,7 +632,7 @@ function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: str
         ${statusIcon(pull)}
         <span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">${repoTag(pull, primaryRepo)}#${pull.number}</span>
         <span class="t">${escapeHtml(pull.title)}</span>
-        <span class="right">${pull.queueEntry != null ? `<span class="queue-pill" title="${escapeHtml(queueLabel(pull))}">Queued</span>` : ''}${readinessDot(pull)}${checksIcon(pull)}<span class="delta"><i class="add">+${pull.additions}</i> <i class="del">−${pull.deletions}</i></span><span class="age">${relativeTime(pull.updatedAt)}</span>${avatar(pull)}</span>
+        <span class="right">${pull.queueEntry != null ? `<span class="queue-pill" title="${escapeHtml(queueLabel(pull))}">Queued</span>` : ''}${readinessDot(pull)}${checksIcon(pull)}<span class="delta"><i class="add">+${pull.additions}</i> <i class="del">−${pull.deletions}</i></span>${turnMarker(pull)}<span class="age">${relativeTime(pull.updatedAt)}</span>${avatar(pull)}</span>
       </li>`;
 }
 
@@ -893,6 +935,13 @@ function chip(content: string, title: string, className = ''): string {
   return `<span class="chip-meta ${className}" title="${escapeHtml(title)}">${content}</span>`;
 }
 
+function turnChip(pull: PullRequest): string {
+  const turn = turnFor(pull);
+  if (turn == null) return '';
+  if (turn.whose === 'mine') return chip(`<span class="turn mine"></span>Your turn · ${escapeHtml(turn.reason)}`, `Your turn · ${turn.reason}`, 'plain turn-chip mine');
+  return chip(`${icon('hourglass')}${escapeHtml(waitingLabel(turn))}`, waitingLabel(turn), 'plain turn-chip theirs');
+}
+
 function renderDetailMeta(pull: PullRequest): void {
   const checks = checksLabel(pull);
   const review = reviewLabel(pull);
@@ -901,6 +950,7 @@ function renderDetailMeta(pull: PullRequest): void {
   dom.statusBar.innerHTML = [
     chip(`${avatar(pull)}${escapeHtml(pull.author?.login ?? 'ghost')}`, 'Author', 'plain'),
     chip(`<code>${escapeHtml(pull.headRefName)}</code><span class="arrow">→</span><code>${escapeHtml(pull.baseRefName)}</code>`, `${pull.headRefName} → ${pull.baseRefName}`, 'plain branch'),
+    turnChip(pull),
     `<span class="status-summary" title="${escapeHtml(summary)}">${statusIcon(pull)}</span>`,
   ].join('');
   dom.merge.disabled = pull.isDraft || pull.mergeable === 'CONFLICTING' || pull.queueEntry != null || leaving.has(pull.id);
@@ -1345,8 +1395,12 @@ function refresh(kind: QueueKind, isForced = false): Promise<void> {
   const running = inFlight.get(kind);
   if (running != null) return running;
   if (!isForced && Date.now() - (lastFetchedAt.get(kind) ?? 0) < MIN_REFRESH_GAP_MS) return Promise.resolve();
-  const pending = fetchQueue(kind)
+  const pending = (kind === 'turn' ? fetchTurnQueue() : fetchQueue(kind))
     .then((pulls) => {
+      if (kind === 'review') {
+        reviewRequestedIds = new Set(pulls.map((pull) => pull.id));
+        resetTurns();
+      }
       lastFetchedAt.set(kind, Date.now());
       const merged = pulls.map((pull) => mergeStateCache.get(pull.id)?.updatedAt === pull.updatedAt ? { ...pull, ...mergeStateCache.get(pull.id)?.state } : pull);
       queueCache.set(kind, merged);
@@ -2049,6 +2103,7 @@ const COMMANDS: Command[] = [
   { id: 'check-clear', section: 'Select', title: 'Clear selection', keys: ['esc', '⌫'], run: clearChecked, isEnabled: () => state.checkedIds.size > 0 },
   { id: 'bulk-approve', section: 'Select', title: 'Approve selected', aliases: 'bulk lgtm', keys: ['⇧a'], run: () => void bulkApprove(), isEnabled: () => state.checkedIds.size > 0 },
 
+  { id: 'view-turn', section: 'Views', title: 'Go to My turn', keys: ['⌘4', 'g t'], run: () => switchKind('turn') },
   { id: 'view-review', section: 'Views', title: 'Go to Review requested', keys: ['⌘1', 'g r'], run: () => switchKind('review') },
   { id: 'view-involved', section: 'Views', title: 'Go to Involved', keys: ['⌘2', 'g i'], run: () => switchKind('involved') },
   { id: 'view-mine', section: 'Views', title: 'Go to Created by me', keys: ['⌘3', 'g m'], run: () => switchKind('mine') },
@@ -2254,6 +2309,7 @@ window.setInterval(() => {
 
 void fetchViewerLogin().then((login) => {
   viewer = login;
+  resetTurns();
   const pull = selectedPull();
   if (pull != null) renderDetailMeta(pull);
   renderBulkBar();
@@ -2281,7 +2337,7 @@ let restartIntoUpdate: (() => void) | null = null;
 
 renderBootSkeletons();
 void refresh(state.kind, true).then(() => {
-  (['mine', 'review', 'involved'] satisfies QueueKind[]).filter((kind) => kind !== state.kind).forEach((kind) => void refresh(kind, true));
+  (['turn', 'mine', 'review', 'involved'] satisfies QueueKind[]).filter((kind) => kind !== state.kind).forEach((kind) => void refresh(kind, true));
 });
 
 if (import.meta.env.VITE_PR_REVIEW_HARNESS === '1') {

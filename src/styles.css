@@ -600,7 +600,7 @@ diffs-container { --diffs-dark-bg: var(--bg); --diffs-light-bg: var(--bg); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 #list-pane .pane-head .head-title { gap: 6px; min-width: 0; flex: 1; }
 .view-pills { display: flex; gap: 2px; min-width: 0; flex: 0 1 auto; -webkit-app-region: no-drag; }
-.view-pills button { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border: 0; border-radius: 999px; background: none; color: var(--text-3); font-size: 12px; font-weight: 500; white-space: nowrap; }
+.view-pills button { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 7px; border: 0; border-radius: 999px; background: none; color: var(--text-3); font-size: 12px; font-weight: 500; white-space: nowrap; }
 .view-pills button:hover { background: var(--bg-hover); color: var(--text-2); }
 .view-pills button.active { background: var(--bg-active); color: var(--text); }
 .view-pills .count { margin: 0; color: var(--text-4); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -855,3 +855,12 @@ kbd[data-glyph='backspace'] { --kbd-glyph: url("data:image/svg+xml,%3Csvg%20xmln
 .update-pill[hidden] { display: none; }
 .update-pill .ico { width: 12px; height: 12px; stroke-width: 2.25; }
 .update-pill:hover { filter: brightness(1.08); }
+
+/* Whose turn: an accent dot when the next move is mine, an hourglass while waiting on someone. */
+.turn { flex: none; width: 12px; height: 12px; display: inline-grid; place-items: center; color: var(--text-4); }
+.turn.mine::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.turn .ico { width: 12px; height: 12px; }
+.turn-chip { gap: 6px; }
+.turn-chip.mine { color: var(--text-2); }
+.turn-chip.theirs { color: var(--text-3); }
+.turn-chip .ico { width: 12px; height: 12px; flex: none; }

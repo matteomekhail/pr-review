@@ -8,8 +8,9 @@ A fast, keyboard-first macOS app for reviewing and merging GitHub pull requests.
 
 ## Features
 
-- **Queue:** review requested, involved, and created by me, with counts.
-- **Smart filters:** Ready (green, mergeable, no changes requested), Small (≤150 lines), Recent (48h). The Smart sort ranks by readiness.
+- **Queue:** My turn, created by me, review requested and involved, with counts.
+- **My turn:** PRs where the next move is yours: a reviewer answered on your PR after your last push or reply, it is approved and ready to merge, your review is requested, or the author updated a PR since your review. Rows show a dot when it is your turn and an hourglass while you wait on someone (hover for who and why), and the **Waiting** filter lists the PRs waiting on others. Bots never take a turn.
+- **Smart filters:** Ready (green, mergeable, no changes requested), Unready, Waiting (on someone else), Small (≤150 lines), Recent (48h), Tested. The Smart sort ranks by readiness.
 - **Jev readiness (optional):** with a TypeSafe API key, each PR is scored by [Jev](https://typesafe.ai) on review evidence, open concerns, change risk and scope, taken from its description, reviews and comments. Without a key, it falls back to the built-in rules.
 - **Diffs:** [`@pierre/diffs`](https://www.npmjs.com/package/@pierre/diffs), virtualized and syntax-highlighted in web workers. Collapsible files and sticky headers.
 - **Preview:** `P` opens the preview deployment found in bot comments or the body (for example `pr-123.preview.example.com`, Vercel, Netlify, Cloudflare Pages); the header button is disabled when there is none.

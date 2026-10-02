@@ -15,7 +15,10 @@ export interface FixturePull {
   mergeQueueEntry: { position: number; state: string } | null;
   author: { login: string; avatarUrl: string };
   repository: { nameWithOwner: string };
-  commits: { nodes: { commit: { statusCheckRollup: { state: string } | null } }[] };
+  commits: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: string } | null } }[] };
+  reviewRequests?: { nodes: { requestedReviewer: { __typename: string; login?: string; name?: string } | null }[] };
+  reviews?: { nodes: { state: string; submittedAt: string; author: { login: string; avatarUrl: string; __typename: string } }[] };
+  comments?: { nodes: { createdAt: string; author: { login: string; avatarUrl: string; __typename: string } }[] };
 }
 
 export const FIXTURE_NOW = Date.parse('2026-09-26T12:00:00Z');
