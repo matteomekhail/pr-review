@@ -8,7 +8,7 @@ import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, de
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, commentOnPull, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { approvePull, commentOnPull, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchPulls, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
 import { DiffView, parseDiff, type DiffStyle, type ParsedFile } from './diffs';
 import { sanitizeHtml } from './sanitize';
 import { CommandRegistry, renderShortcut, type Command } from './commands';
@@ -25,7 +25,8 @@ import { invalidateConversation, loadConversation, type ConversationItem } from 
 import { isReady, isRecent, isSmall, matchesSmartFilter, sortPulls, type SmartFilter, type SortOrder } from './smart';
 import { assessReadiness, isReadinessAvailable, type ReadinessResult } from './readiness';
 import { computeTurn, type Turn } from './turn';
-import { describeAsk, inAskScope, reviewAsk, type AskScope, type ReviewAsk } from './request';
+import { describeAsk, inAskScope, isStaleRequest, reviewAsk, type AskScope, type ReviewAsk } from './request';
+import { verdictOf, withMyApproval } from './approval';
 import { botReviews, describeBotReview } from './review-bots';
 
 interface State {
@@ -45,7 +46,7 @@ interface State {
 const PREFETCH_AHEAD = 5;
 const DIFF_CACHE_LIMIT = 24;
 const QUEUE_REFRESH_MS = 120_000;
-const VIEW_TITLES: Record<QueueKind, string> = { turn: 'My turn', review: 'Review requested', involved: 'Involved', mine: 'Created by me' };
+const VIEW_TITLES: Record<QueueKind, string> = { turn: 'My turn', review: 'Review requested', involved: 'Involved', mine: 'Created by me', approved: 'Approved by me' };
 const MERGE_LABELS: Record<MergeMethod, string> = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' };
 
 const element = <T extends HTMLElement>(id: string): T => {
@@ -291,7 +292,7 @@ function invalidateList(): void {
   listVersion += 1;
 }
 
-/** PRs whose review GitHub says is requested from me, including through a team. */
+/** PRs whose review is requested from me, including through a team (GitHub's search, less requests I already answered). */
 let reviewRequestedIds = new Set<string>();
 let turnCache = new WeakMap<PullRequest, Turn | null>();
 
@@ -316,21 +317,11 @@ function loadViewerTeams(): void {
   });
 }
 
+/** Who I am or which teams I am in changed: every tab built on that is rebuilt. */
 function resetTurns(): void {
-  turnCache = new WeakMap();
-  invalidateList();
+  publishQueues(QUEUE_KINDS);
+  persistSearches();
   renderList();
-}
-
-/** My turn: my PRs, review requests and PRs I reviewed, kept where the next move is mine. */
-async function fetchTurnQueue(): Promise<PullRequest[]> {
-  const [login, mine, review, reviewed] = await Promise.all([fetchViewerLogin(), fetchQueue('mine'), fetchQueue('review'), fetchQueue('reviewed')]);
-  const requested = new Set(review.map((pull) => pull.id));
-  reviewRequestedIds = requested;
-  turnCache = new WeakMap();
-  invalidateList();
-  const seen = new Set<string>();
-  return [...review, ...mine, ...reviewed].filter((pull) => !seen.has(pull.id) && seen.add(pull.id) != null && computeTurn(pull, login, requested.has(pull.id))?.whose === 'mine');
 }
 
 function currentListKey(): string {
@@ -355,9 +346,9 @@ function withLeaving(ranked: PullRequest[]): PullRequest[] {
   return [...ranked, ...[...leaving.values()].filter((entry) => !present.has(entry.pull.id)).map((entry) => entry.pull)];
 }
 
-/** My own PRs have no review requests to scope, so the scope menu neither shows nor applies there. */
+/** My own PRs, and ones I already approved, have no open requests to scope, so the menu neither shows nor applies there. */
 function hasAskScope(kind: QueueKind): boolean {
-  return kind !== 'mine';
+  return kind !== 'mine' && kind !== 'approved';
 }
 
 function matchesAskScope(pull: PullRequest, kind: QueueKind): boolean {
@@ -734,7 +725,7 @@ function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: str
 function renderListEmpty(count: number, needle: string): void {
   const box = document.getElementById('list-empty');
   if (box == null) return;
-  const isBooting = !lastFetchedAt.has(state.kind) && state.pulls.length === 0;
+  const isBooting = fetchedAt(state.kind) == null && state.pulls.length === 0;
   const isSearching = needle !== '' && isSemanticLoading;
   const isAwaiting = count === 0 && state.pulls.length > 0 && isAwaitingMergeStates();
   const kind = count > 0 || isBooting ? '' : isSearching ? 'searching' : isAwaiting ? 'checking' : state.pulls.length === 0 ? 'empty' : needle !== '' ? 'no-results' : 'filtered';
@@ -817,7 +808,7 @@ function syncDetailVisibility(pulls: PullRequest[]): void {
     });
     return;
   }
-  if (!lastFetchedAt.has(state.kind) && state.pulls.length === 0) return;
+  if (fetchedAt(state.kind) == null && state.pulls.length === 0) return;
   if (pulls.length === 0 && state.pulls.length > 0 && isAwaitingMergeStates()) {
     dom.pr.hidden = true;
     dom.empty.hidden = false;
@@ -1405,19 +1396,29 @@ async function scoreWithJev(pulls: PullRequest[]): Promise<void> {
 }
 let mergeStateRenderFrame = 0;
 
-function applyMergeStates(kind: QueueKind, states: MergeState[]): void {
+function withMergeState(pull: PullRequest): PullRequest {
+  const cached = mergeStateCache.get(pull.id);
+  return cached?.updatedAt === pull.updatedAt ? { ...pull, mergeable: cached.state.mergeable, mergeStateStatus: cached.state.mergeStateStatus } : pull;
+}
+
+/** Merge states land in every tab holding the PR, since tabs share searches. */
+function applyMergeStates(states: MergeState[]): void {
   invalidateList();
   const byId = new Map(states.map((mergeState) => [mergeState.id, mergeState]));
-  const pulls = queueCache.get(kind);
-  if (pulls == null) return;
-  const updated = pulls.map((pull) => {
-    const mergeState = byId.get(pull.id);
-    if (mergeState == null) return pull;
-    if (mergeState.mergeStateStatus !== 'UNKNOWN') mergeStateCache.set(pull.id, { updatedAt: pull.updatedAt, state: mergeState });
-    return { ...pull, mergeable: mergeState.mergeable, mergeStateStatus: mergeState.mergeStateStatus };
-  });
-  queueCache.set(kind, updated);
-  if (kind !== state.kind) return;
+  const updatedAtById = new Map([...queueCache.values()].flat().map((pull) => [pull.id, pull.updatedAt]));
+  for (const mergeState of states) {
+    const updatedAt = updatedAtById.get(mergeState.id);
+    if (updatedAt != null && mergeState.mergeStateStatus !== 'UNKNOWN') mergeStateCache.set(mergeState.id, { updatedAt, state: mergeState });
+  }
+  for (const [kind, pulls] of queueCache) {
+    if (!pulls.some((pull) => byId.has(pull.id))) continue;
+    queueCache.set(kind, pulls.map((pull) => {
+      const mergeState = byId.get(pull.id);
+      return mergeState == null ? pull : { ...pull, mergeable: mergeState.mergeable, mergeStateStatus: mergeState.mergeStateStatus };
+    }));
+  }
+  const updated = queueCache.get(state.kind);
+  if (updated == null || !state.pulls.some((pull) => byId.has(pull.id))) return;
   state.pulls = updated;
   cancelAnimationFrame(mergeStateRenderFrame);
   mergeStateRenderFrame = requestAnimationFrame(() => {
@@ -1433,23 +1434,186 @@ function applyMergeStates(kind: QueueKind, states: MergeState[]): void {
 
 const MERGE_STATE_RETRY_MS = [2_000, 5_000, 10_000, 20_000];
 
-async function loadMergeStates(kind: QueueKind, pulls: PullRequest[]): Promise<void> {
-  let pending = pulls.filter((pull) => mergeStateCache.get(pull.id)?.updatedAt !== pull.updatedAt).map((pull) => pull.id);
-  for (let attempt = 0; pending.length > 0; attempt += 1) {
-    const unknown: string[] = [];
-    await fetchMergeStates(pending, (states) => {
-      applyMergeStates(kind, states);
-      unknown.push(...states.filter((mergeState) => mergeState.mergeStateStatus === 'UNKNOWN').map((mergeState) => mergeState.id));
-    });
-    const delay = MERGE_STATE_RETRY_MS[attempt];
-    if (delay == null || unknown.length === 0) return;
-    await new Promise((resolve) => window.setTimeout(resolve, delay));
-    pending = unknown;
+const mergeStatesInFlight = new Set<string>();
+
+async function loadMergeStates(pulls: PullRequest[]): Promise<void> {
+  const ids = [...new Set(pulls.filter((pull) => mergeStateCache.get(pull.id)?.updatedAt !== pull.updatedAt && !mergeStatesInFlight.has(pull.id)).map((pull) => pull.id))];
+  ids.forEach((id) => mergeStatesInFlight.add(id));
+  try {
+    let pending = ids;
+    for (let attempt = 0; pending.length > 0; attempt += 1) {
+      const unknown: string[] = [];
+      await fetchMergeStates(pending, (states) => {
+        applyMergeStates(states);
+        unknown.push(...states.filter((mergeState) => mergeState.mergeStateStatus === 'UNKNOWN').map((mergeState) => mergeState.id));
+      });
+      const delay = MERGE_STATE_RETRY_MS[attempt];
+      if (delay == null || unknown.length === 0) return;
+      await new Promise((resolve) => window.setTimeout(resolve, delay));
+      pending = unknown;
+    }
+  } finally {
+    ids.forEach((id) => mergeStatesInFlight.delete(id));
+  }
+}
+
+/** The searches behind each tab. A search shared by tabs is fetched once and feeds all of them. */
+const QUEUE_SEARCHES: Record<QueueKind, readonly SearchKind[]> = { turn: ['review', 'mine', 'reviewed'], review: ['review'], mine: ['mine'], involved: ['involved'], approved: ['reviewed'] };
+const QUEUE_KINDS = Object.keys(QUEUE_SEARCHES) as QueueKind[];
+const SEARCH_KINDS: readonly SearchKind[] = ['review', 'mine', 'involved', 'reviewed'];
+/** Searches outlive restarts, so the app opens on the last data it saw while it refreshes. */
+const SEARCH_CACHE_KEY = 'searchCache.v1';
+/** A forced refresh still reuses a search that finished this recently, e.g. for another tab. */
+const FRESH_SEARCH_MS = 3_000;
+/** GitHub's search index trails reviews by minutes; a PR I reviewed here stays in my reviewed search meanwhile. */
+const SEARCH_LAG_MS = 10 * 60_000;
+/** After I act on a PR it is fetched again now, then once checks a review triggers (e.g. an approval gate) have had time to rerun. */
+const FOLLOW_UP_FETCH_MS = [0, 20_000, 60_000];
+
+const searches = new Map<SearchKind, { at: number; pulls: PullRequest[] }>();
+const searchesInFlight = new Map<SearchKind, Promise<void>>();
+const reviewedHere = new Map<string, number>();
+
+function loadSearch(kind: SearchKind, maxAgeMs: number): Promise<void> {
+  const cached = searches.get(kind);
+  if (cached != null && Date.now() - cached.at < maxAgeMs) return Promise.resolve();
+  const running = searchesInFlight.get(kind);
+  if (running != null) return running;
+  const pending = fetchQueue(kind, cached?.pulls.length ?? 0)
+    .then((pulls) => storeSearch(kind, pulls))
+    .finally(() => searchesInFlight.delete(kind));
+  searchesInFlight.set(kind, pending);
+  return pending;
+}
+
+function storeSearch(kind: SearchKind, pulls: PullRequest[]): void {
+  const found = new Set(pulls.map((pull) => pull.id));
+  const lagging = kind === 'reviewed' ? searchPulls(kind).filter((pull) => !found.has(pull.id) && Date.now() - (reviewedHere.get(pull.id) ?? 0) < SEARCH_LAG_MS) : [];
+  searches.set(kind, { at: Date.now(), pulls: [...lagging, ...pulls] });
+  if (kind === 'review' && viewerTeams == null) loadViewerTeams();
+  publishQueues(QUEUE_KINDS.filter((queue) => QUEUE_SEARCHES[queue].includes(kind)));
+  persistSearches();
+}
+
+function searchPulls(kind: SearchKind): PullRequest[] {
+  return searches.get(kind)?.pulls ?? [];
+}
+
+/** When a tab's searches were fetched: the oldest of them, or undefined until each has been. */
+function fetchedAt(kind: QueueKind): number | undefined {
+  const times = QUEUE_SEARCHES[kind].map((search) => searches.get(search)?.at);
+  return times.every((time): time is number => time != null) ? Math.min(...times) : undefined;
+}
+
+function requestedPulls(): PullRequest[] {
+  return searchPulls('review').filter((pull) => !isStaleRequest(pull, viewer, viewerTeams));
+}
+
+function deriveQueue(kind: QueueKind): PullRequest[] {
+  switch (kind) {
+    case 'review':
+      return requestedPulls();
+    case 'mine':
+    case 'involved':
+      return searchPulls(kind);
+    case 'approved':
+      return searchPulls('reviewed').filter((pull) => verdictOf(pull.activity.reviews, viewer) === 'APPROVED');
+    case 'turn': {
+      const seen = new Set<string>();
+      return [...requestedPulls(), ...searchPulls('mine'), ...searchPulls('reviewed')].filter((pull) => !seen.has(pull.id) && seen.add(pull.id) != null && turnFor(pull)?.whose === 'mine');
+    }
+    default:
+      return kind satisfies never;
+  }
+}
+
+/** Rebuilds tabs from their searches and shows the current one; tabs whose searches have not all arrived wait. */
+function publishQueues(kinds: readonly QueueKind[]): void {
+  reviewRequestedIds = new Set(requestedPulls().map((pull) => pull.id));
+  turnCache = new WeakMap();
+  invalidateList();
+  const published: PullRequest[] = [];
+  for (const kind of kinds) {
+    if (fetchedAt(kind) == null) continue;
+    const pulls = deriveQueue(kind).map(withMergeState);
+    queueCache.set(kind, pulls);
+    published.push(...pulls);
+    if (kind === state.kind) applyQueue(pulls);
+  }
+  renderCounts();
+  void loadMergeStates(published).catch((error: unknown) => console.warn('merge states failed', errorMessage(error)));
+}
+
+function persistSearches(): void {
+  try {
+    const live = new Set([...searches.values()].flatMap((entry) => entry.pulls.map((pull) => pull.id)));
+    const mergeStates = Object.fromEntries([...mergeStateCache].filter(([id]) => live.has(id)));
+    localStorage.setItem(SEARCH_CACHE_KEY, JSON.stringify({ viewer, teams: viewerTeams == null ? null : [...viewerTeams], searches: Object.fromEntries(searches), mergeStates }));
+  } catch (error) {
+    console.warn('could not cache queues', errorMessage(error));
+  }
+}
+
+interface SearchCache {
+  viewer: string | null;
+  teams: string[] | null;
+  searches: Partial<Record<SearchKind, { at: number; pulls: PullRequest[] }>>;
+  mergeStates: Record<string, { updatedAt: string; state: MergeState }>;
+}
+
+/** Shows the last data seen, then refreshes; a cache from another account or an older shape is dropped. */
+function hydrateSearches(): void {
+  try {
+    const cached = JSON.parse(localStorage.getItem(SEARCH_CACHE_KEY) ?? 'null') as SearchCache | null;
+    if (cached == null) return;
+    viewer = cached.viewer;
+    viewerTeams = cached.teams == null ? null : new Set(cached.teams);
+    Object.entries(cached.mergeStates).forEach(([id, entry]) => mergeStateCache.set(id, entry));
+    for (const kind of SEARCH_KINDS) {
+      const entry = cached.searches[kind];
+      if (entry != null && Array.isArray(entry.pulls) && entry.pulls.every((pull) => pull.activity != null && Array.isArray(pull.failingChecks))) searches.set(kind, entry);
+    }
+    publishQueues(QUEUE_KINDS);
+  } catch (error) {
+    console.warn('dropping queue cache', errorMessage(error));
+    localStorage.removeItem(SEARCH_CACHE_KEY);
+  }
+}
+
+/** Puts new copies of pull requests into every search holding them, and into `addTo` if it lacks them. */
+function patchSearches(updated: readonly PullRequest[], addTo: SearchKind | null = null): void {
+  const byId = new Map(updated.map((pull) => [pull.id, pull]));
+  for (const [kind, entry] of searches) {
+    const present = new Set(entry.pulls.map((pull) => pull.id));
+    const added = kind === addTo ? updated.filter((pull) => !present.has(pull.id)) : [];
+    searches.set(kind, { ...entry, pulls: [...added, ...entry.pulls.map((pull) => byId.get(pull.id) ?? pull)] });
+  }
+}
+
+/** Rebuilds every tab after a local change, refreshing the open PR's header if it was touched. */
+function republish(touched: ReadonlySet<string>): void {
+  publishQueues(QUEUE_KINDS);
+  persistSearches();
+  const pull = selectedPull();
+  if (pull != null && touched.has(pull.id)) renderDetailMeta(pull);
+}
+
+/** Fetches just these PRs again, now and after the checks my action triggers have rerun, instead of whole queues. */
+function followUp(ids: readonly string[]): void {
+  if (ids.length === 0) return;
+  for (const delay of FOLLOW_UP_FETCH_MS) {
+    window.setTimeout(() => {
+      void fetchPulls(ids)
+        .then((fresh) => {
+          patchSearches(fresh);
+          republish(new Set(ids));
+        })
+        .catch((error: unknown) => console.warn('pull refresh failed', errorMessage(error)));
+    }, delay);
   }
 }
 
 const inFlight = new Map<QueueKind, Promise<void>>();
-const lastFetchedAt = new Map<QueueKind, number>();
 const MIN_REFRESH_GAP_MS = 20_000;
 
 let refreshTicker: number | undefined;
@@ -1460,7 +1624,7 @@ function renderRefreshStatus(): void {
   button?.classList.toggle('spinning', isLoading);
   document.getElementById('list-pane')?.classList.toggle('loading', isLoading);
   if (button == null) return;
-  const at = lastFetchedAt.get(state.kind);
+  const at = fetchedAt(state.kind);
   const seconds = at == null ? null : Math.round((Date.now() - at) / 1000);
   const age = seconds == null ? '' : seconds < 10 ? ' · updated just now' : seconds < 60 ? ` · updated ${seconds}s ago` : ` · updated ${Math.round(seconds / 60)}m ago`;
   button.dataset.tip = isLoading ? 'Refreshing…' : `Refresh${age}  ⌘R`;
@@ -1492,7 +1656,7 @@ function manualRefresh(): void {
   const pending = refresh(kind, true);
   renderRefreshStatus();
   void pending.then(() => {
-    if (kind !== state.kind || !lastFetchedAt.has(kind) || (lastFetchedAt.get(kind) ?? 0) < started) return;
+    if (kind !== state.kind || (fetchedAt(kind) ?? 0) < started) return;
     toast(summarizeChange(before, queueCache.get(kind) ?? []));
   });
 }
@@ -1500,22 +1664,13 @@ function manualRefresh(): void {
 function refresh(kind: QueueKind, isForced = false): Promise<void> {
   const running = inFlight.get(kind);
   if (running != null) return running;
-  if (!isForced && Date.now() - (lastFetchedAt.get(kind) ?? 0) < MIN_REFRESH_GAP_MS) return Promise.resolve();
-  const pending = (kind === 'turn' ? fetchTurnQueue() : fetchQueue(kind))
-    .then((pulls) => {
-      if (kind === 'review') {
-        reviewRequestedIds = new Set(pulls.map((pull) => pull.id));
-        resetTurns();
-        if (viewerTeams == null) loadViewerTeams();
-      }
-      lastFetchedAt.set(kind, Date.now());
-      const merged = pulls.map((pull) => mergeStateCache.get(pull.id)?.updatedAt === pull.updatedAt ? { ...pull, ...mergeStateCache.get(pull.id)?.state } : pull);
-      queueCache.set(kind, merged);
-      renderCounts();
-      if (kind === state.kind) applyQueue(merged);
-      if (kind === state.kind) void scoreWithJev(merged);
-      if (kind === state.kind) void ensureGroups();
-      void loadMergeStates(kind, merged).catch((error: unknown) => console.warn('merge states failed', errorMessage(error)));
+  if (!isForced && Date.now() - (fetchedAt(kind) ?? 0) < MIN_REFRESH_GAP_MS) return Promise.resolve();
+  const maxAge = isForced ? FRESH_SEARCH_MS : MIN_REFRESH_GAP_MS;
+  const pending = Promise.all(QUEUE_SEARCHES[kind].map((search) => loadSearch(search, maxAge)))
+    .then(() => {
+      if (kind !== state.kind) return;
+      void scoreWithJev(state.pulls);
+      void ensureGroups();
     })
     .catch((error: unknown) => {
       if (kind !== state.kind) return;
@@ -1538,7 +1693,7 @@ function applyQueue(pulls: PullRequest[]): void {
   const previous = selectedPull();
   state.pulls = pulls.filter((pull) => !leaving.has(pull.id)).concat([...leaving.values()].map((entry) => entry.pull));
   renderList();
-  const stillThere = previous == null ? undefined : pulls.find((pull) => pull.id === previous.id);
+  const stillThere = previous == null ? undefined : state.pulls.find((pull) => pull.id === previous.id);
   if (stillThere != null) {
     if (stillThere.updatedAt !== previous?.updatedAt) void select(stillThere);
     return;
@@ -1817,6 +1972,45 @@ function isOwnPull(pull: PullRequest): boolean {
   return viewer != null && pull.author?.login.toLowerCase() === viewer.toLowerCase();
 }
 
+/**
+ * Approval shows before GitHub answers: each PR reads approved, joins Approved and leaves the tabs that were
+ * waiting on me. A refusal puts it back; an acceptance is confirmed by fetching just those PRs again.
+ * Returns one message per refusal.
+ */
+async function approveNow(pulls: readonly PullRequest[]): Promise<string[]> {
+  if (viewer == null || pulls.length === 0) return [];
+  const before = new Map(searches);
+  const shown = new Set(state.pulls.map((pull) => pull.id));
+  const at = new Date().toISOString();
+  const approved = pulls.map((pull) => withMyApproval(pull, viewer as string, viewerTeams, at));
+  const visible = approved.filter((pull) => shown.has(pull.id));
+  approved.forEach((pull) => reviewedHere.set(pull.id, Date.now()));
+  visible.forEach((pull) => leaving.set(pull.id, { pull, label: 'Approved' }));
+  patchSearches(approved, 'reviewed');
+  republish(new Set(pulls.map((pull) => pull.id)));
+  const here = new Set((queueCache.get(state.kind) ?? []).map((pull) => pull.id));
+  visible.forEach((pull) => (here.has(pull.id) ? leaving.delete(pull.id) : scheduleLeave(pull.id)));
+  invalidateList();
+  renderList();
+  const results = await Promise.allSettled(pulls.map((pull) => approvePull(pull)));
+  const refused = pulls.filter((_, index) => results[index]?.status === 'rejected');
+  if (refused.length > 0) {
+    const refusedIds = new Set(refused.map((pull) => pull.id));
+    for (const [kind, entry] of searches) {
+      const previous = new Map((before.get(kind)?.pulls ?? []).map((pull) => [pull.id, pull]));
+      searches.set(kind, { ...entry, pulls: entry.pulls.flatMap((pull) => (!refusedIds.has(pull.id) ? [pull] : previous.has(pull.id) ? [previous.get(pull.id) as PullRequest] : [])) });
+    }
+    refused.forEach((pull) => {
+      reviewedHere.delete(pull.id);
+      leaving.delete(pull.id);
+      window.clearTimeout(leaveTimers.get(pull.id));
+    });
+    republish(refusedIds);
+  }
+  followUp(pulls.filter((pull) => !refused.includes(pull)).map((pull) => pull.id));
+  return results.flatMap((result, index) => (result.status === 'rejected' ? [`#${pulls[index]?.number}: ${errorMessage(result.reason).split('\n')[0]}`] : []));
+}
+
 async function bulkApprove(): Promise<void> {
   const checked = checkedPulls();
   const pulls = checked.filter((pull) => !isOwnPull(pull));
@@ -1825,13 +2019,11 @@ async function bulkApprove(): Promise<void> {
     return;
   }
   dom.bulkApprove.disabled = true;
-  const results = await Promise.allSettled(pulls.map((pull) => approvePull(pull)));
-  const failed = results.filter((result) => result.status === 'rejected').length;
+  const failures = await approveNow(pulls);
   const skipped = checked.length - pulls.length;
   const skippedNote = skipped > 0 ? ` · skipped ${skipped} of yours` : '';
-  toast(failed === 0 ? `Approved ${pulls.length}${skippedNote}` : `Approved ${pulls.length - failed}, failed ${failed}${skippedNote}`, failed > 0);
+  toast(failures.length === 0 ? `Approved ${pulls.length}${skippedNote}` : `Approved ${pulls.length - failures.length}, failed ${failures.length}${skippedNote} — ${failures.join(' · ')}`, failures.length > 0);
   dom.bulkApprove.disabled = false;
-  void refresh(state.kind);
 }
 
 async function approveSelected(): Promise<void> {
@@ -1842,15 +2034,9 @@ async function approveSelected(): Promise<void> {
     return;
   }
   dom.approve.disabled = true;
-  try {
-    await approvePull(pull);
-    toast(`Approved #${pull.number}`);
-    void refresh(state.kind);
-  } catch (error) {
-    toast(errorMessage(error), true);
-  } finally {
-    dom.approve.disabled = isOwnPull(pull);
-  }
+  const [failure] = await approveNow([pull]);
+  toast(failure == null ? `Approved #${pull.number}` : failure.replace(/^#\d+: /, ''), failure != null);
+  dom.approve.disabled = isOwnPull(pull);
 }
 
 function confirmMerge(pull: PullRequest, method: MergeMethod): Promise<boolean> {
@@ -1924,7 +2110,11 @@ function openMediaFrom(target: HTMLElement): boolean {
   return lightbox.open(items, index);
 }
 const listPane = element('list-pane');
-new ResizeObserver(([entry]) => listPane.classList.toggle('narrow', (entry?.contentRect.width ?? 999) < 400)).observe(listPane);
+new ResizeObserver(([entry]) => {
+  const width = entry?.contentRect.width ?? 999;
+  listPane.classList.toggle('narrow', width < 400);
+  listPane.classList.toggle('compact', width < 520);
+}).observe(listPane);
 const commands = new CommandRegistry();
 const hasPull = (): boolean => selectedPull() != null;
 const hasFiles = (): boolean => currentFiles.length > 0;
@@ -2216,6 +2406,7 @@ const COMMANDS: Command[] = [
   { id: 'view-review', section: 'Views', title: 'Go to Review requested', keys: ['⌘1', 'g r'], run: () => switchKind('review') },
   { id: 'view-involved', section: 'Views', title: 'Go to Involved', keys: ['⌘2', 'g i'], run: () => switchKind('involved') },
   { id: 'view-mine', section: 'Views', title: 'Go to Created by me', keys: ['⌘3', 'g m'], run: () => switchKind('mine') },
+  { id: 'view-approved', section: 'Views', title: 'Go to Approved by me', keys: ['⌘5', 'g a'], run: () => switchKind('approved') },
 
   { id: 'toggle-sidebar', section: 'Layout', title: 'Toggle pull request list', aliases: 'hide show pane sidebar navigation queue inbox', keys: ['⌘b', '⌘\\'], run: () => layout.toggle('list') },
   { id: 'layout-review', section: 'Layout', title: 'Layout: review (list 24% · description 36% · diff)', aliases: 'preset pane default balanced', keys: ['1', '⌘⌥1'], run: () => applyLayoutPreset('review') },
@@ -2424,6 +2615,10 @@ window.setInterval(() => {
 loadViewerTeams();
 
 void fetchViewerLogin().then((login) => {
+  if (login != null && viewer != null && login !== viewer) {
+    searches.clear();
+    queueCache.clear();
+  }
   viewer = login;
   resetTurns();
   const pull = selectedPull();
@@ -2451,10 +2646,9 @@ const checkForUpdates = startAutoUpdate({
 });
 let restartIntoUpdate: (() => void) | null = null;
 
-renderBootSkeletons();
-void refresh(state.kind, true).then(() => {
-  (['turn', 'mine', 'review', 'involved'] satisfies QueueKind[]).filter((kind) => kind !== state.kind).forEach((kind) => void refresh(kind, true));
-});
+hydrateSearches();
+if (state.pulls.length === 0) renderBootSkeletons();
+QUEUE_KINDS.forEach((kind) => void refresh(kind, true));
 
 if (import.meta.env.VITE_PR_REVIEW_HARNESS === '1') {
   Object.assign(window, {

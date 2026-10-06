@@ -1,4 +1,5 @@
-import type { PullRequest, ReviewState } from './github';
+import type { PullRequest } from './github';
+import { latestVerdicts } from './approval';
 
 export type StatusTone = 'queued' | 'blocked' | 'draft' | 'approved' | 'pending';
 export type AttentionReason = 'conflicts' | 'failing checks' | 'changes requested' | 'blocked' | 'not approved';
@@ -39,7 +40,6 @@ export type Blocker = Exclude<AttentionReason, 'not approved'>;
 /** The order a red status icon picks its glyph from: what most needs a human first. */
 const BLOCKER_ORDER: readonly Blocker[] = ['conflicts', 'changes requested', 'failing checks', 'blocked'];
 const BLOCKER_LABELS: Record<Blocker, string> = { conflicts: 'Conflicts', 'changes requested': 'Changes requested', 'failing checks': 'Checks failing', blocked: 'Blocked' };
-const REVIEW_VERDICTS = new Set<ReviewState>(['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED']);
 
 export function blockers(pull: PullRequest): Blocker[] {
   const reasons = attentionReasons(pull);
@@ -48,12 +48,7 @@ export function blockers(pull: PullRequest): Blocker[] {
 
 /** Reviewers whose latest verdict asks for changes; a later comment does not withdraw it. */
 export function changeRequesters(pull: PullRequest): string[] {
-  const verdicts = new Map<string, { state: ReviewState; at: string }>();
-  for (const review of pull.activity.reviews) {
-    const previous = verdicts.get(review.author.login);
-    if (REVIEW_VERDICTS.has(review.state) && (previous == null || review.at >= previous.at)) verdicts.set(review.author.login, review);
-  }
-  return [...verdicts].filter(([, verdict]) => verdict.state === 'CHANGES_REQUESTED').map(([login]) => login);
+  return [...latestVerdicts(pull.activity.reviews)].filter(([, verdict]) => verdict.state === 'CHANGES_REQUESTED').map(([login]) => login);
 }
 
 /** One phrase per reason the pull request is red, the icon's own first. */

@@ -1,10 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { isReviewBotCheck } from './review-bots';
+import { decisionFromVerdicts } from './approval';
 
 /** A GitHub search behind a queue. */
 export type SearchKind = 'review' | 'mine' | 'involved' | 'reviewed';
-/** A tab: one search, or `turn`, which is derived from several. */
-export type QueueKind = Exclude<SearchKind, 'reviewed'> | 'turn';
+/** A tab: built from one or more searches (see QUEUE_SEARCHES in main.ts). */
+export type QueueKind = Exclude<SearchKind, 'reviewed'> | 'turn' | 'approved';
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
 export type MergeableState = 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
 export type CheckState = 'SUCCESS' | 'FAILURE' | 'ERROR' | 'PENDING' | 'EXPECTED';
@@ -129,7 +130,9 @@ function toActivity({ commits, reviewRequests, reviews, comments }: RawPullReque
 function toPullRequest(raw: RawPullRequest): PullRequest {
   const { commits, mergeQueueEntry, reviewRequests: _requests, reviews: _reviews, comments: _comments, ...pull } = raw;
   const rollup = commits.nodes[0]?.commit.statusCheckRollup;
-  return { ...pull, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: rollup?.state ?? null, failingChecks: toFailingChecks(rollup?.contexts?.nodes ?? []), activity: toActivity(raw) };
+  const activity = toActivity(raw);
+  const reviewDecision = pull.reviewDecision ?? decisionFromVerdicts(pull.author?.login ?? null, activity.reviews);
+  return { ...pull, reviewDecision, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: rollup?.state ?? null, failingChecks: toFailingChecks(rollup?.contexts?.nodes ?? []), activity };
 }
 
 const MERGE_STATE_BATCH = 20;
@@ -152,8 +155,9 @@ export async function fetchMergeStates(ids: readonly string[], onBatch: (states:
   if (failure != null) throw failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
 }
 
-export async function fetchQueue(kind: SearchKind): Promise<PullRequest[]> {
-  const parsed: QueuePage | QueuePage[] = JSON.parse(await invoke<string>('queue', { kind }));
+/** `expected` is how many PRs the search had last time, so its pages can be asked for together. */
+export async function fetchQueue(kind: SearchKind, expected = 0): Promise<PullRequest[]> {
+  const parsed: QueuePage | QueuePage[] = JSON.parse(await invoke<string>('queue', { kind, expected }));
   const pages = Array.isArray(parsed) ? parsed : [parsed];
   const failed = pages.find((page) => page.data == null);
   if (failed != null) throw new Error(failed.errors?.map((error) => error.message).join('; ') ?? 'Empty response');
@@ -163,6 +167,18 @@ export async function fetchQueue(kind: SearchKind): Promise<PullRequest[]> {
     .filter(isPullRequest)
     .filter((node) => !seen.has(node.id) && seen.add(node.id) != null)
     .map(toPullRequest);
+}
+
+interface PullsResponse {
+  data?: { nodes: (RawPullRequest | Record<string, never> | null)[] };
+  errors?: { message: string }[];
+}
+
+/** Fresh copies of a few pull requests, without re-running their searches. */
+export async function fetchPulls(ids: readonly string[]): Promise<PullRequest[]> {
+  const response: PullsResponse = JSON.parse(await invoke<string>('pulls', { ids }));
+  if (response.data == null) throw new Error(response.errors?.map((error) => error.message).join('; ') ?? 'Empty response');
+  return response.data.nodes.filter((node): node is RawPullRequest => node != null && isPullRequest(node)).map(toPullRequest);
 }
 
 export function fetchBody(pull: PullRequest): Promise<string> {

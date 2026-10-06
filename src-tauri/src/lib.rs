@@ -103,33 +103,125 @@ fn search_query(kind: QueueKind) -> &'static str {
 
 /// PRs per search page. GitHub aborts GraphQL queries after about 10s; with review activity and check runs per PR,
 /// a 100-PR page runs past that, while 25 stays near 4s (and costs 1 point).
-const QUEUE_PAGE_SIZE: u32 = 25;
+const QUEUE_PAGE_SIZE: u64 = 25;
+/// GitHub search never returns more than this many results.
+const MAX_SEARCH_RESULTS: u64 = 1_000;
+const SEARCH_PAGE_CONCURRENCY: usize = 6;
+
+fn base64(input: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.as_bytes().chunks(3) {
+        let bits = (u32::from(chunk[0]) << 16) | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8) | u32::from(*chunk.get(2).unwrap_or(&0));
+        for index in 0..4 {
+            encoded.push(if index <= chunk.len() { char::from(ALPHABET[(bits >> (18 - 6 * index)) as usize & 63]) } else { '=' });
+        }
+    }
+    encoded
+}
+
+/// GitHub search cursors are base64 `cursor:<offset>`.
+fn search_cursor(offset: u64) -> String {
+    base64(&format!("cursor:{offset}"))
+}
+
+async fn search_page(query: &str, q: &str, after: Option<&str>) -> Result<serde_json::Value, String> {
+    let mut args = vec!["api".to_string(), "graphql".to_string(), "-f".to_string(), format!("query={query}"), "-f".to_string(), format!("q={q}")];
+    if let Some(cursor) = after {
+        args.push("-f".to_string());
+        args.push(format!("endCursor={cursor}"));
+    }
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let page: serde_json::Value = serde_json::from_str(&gh(&borrowed).await?).map_err(|error| error.to_string())?;
+    if page["data"]["search"].is_null() {
+        let message = page["errors"][0]["message"].as_str().unwrap_or("Empty response");
+        return Err(message.to_string());
+    }
+    Ok(page)
+}
+
+fn spawn_page(query: &str, q: &str, offset: u64) -> tauri::async_runtime::JoinHandle<Result<serde_json::Value, String>> {
+    let (query, q, cursor) = (query.to_string(), q.to_string(), search_cursor(offset));
+    tauri::async_runtime::spawn(async move { search_page(&query, &q, Some(&cursor)).await })
+}
+
+async fn join_pages(handles: Vec<tauri::async_runtime::JoinHandle<Result<serde_json::Value, String>>>) -> Result<Vec<serde_json::Value>, String> {
+    let mut pages = Vec::with_capacity(handles.len());
+    for handle in handles {
+        pages.push(handle.await.map_err(|error| error.to_string())??);
+    }
+    Ok(pages)
+}
+
+/// Every page of a search. `expected` is how many results it had last time: that many pages are asked for at once,
+/// beside the first, then any the search has since grown by. This leans on GitHub's cursors being base64
+/// `cursor:<offset>`; when the first page's cursor is not, the guesses are dropped and pages follow `endCursor`.
+async fn search_pages(query: String, q: String, expected: u64) -> Result<Vec<serde_json::Value>, String> {
+    let guessed: Vec<u64> = (1..SEARCH_PAGE_CONCURRENCY as u64).map(|page| page * QUEUE_PAGE_SIZE).take_while(|offset| *offset < expected.min(MAX_SEARCH_RESULTS)).collect();
+    let speculative: Vec<_> = guessed.iter().map(|offset| spawn_page(&query, &q, *offset)).collect();
+    let first = search_page(&query, &q, None).await?;
+    let info = &first["data"]["search"];
+    let has_next = info["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false);
+    let end_cursor = info["pageInfo"]["endCursor"].as_str().map(str::to_string);
+    let total = info["issueCount"].as_u64().unwrap_or(0).min(MAX_SEARCH_RESULTS);
+    let mut pages = vec![first];
+    if !has_next {
+        return Ok(pages);
+    }
+    if end_cursor.as_deref() == Some(search_cursor(QUEUE_PAGE_SIZE).as_str()) {
+        pages.extend(join_pages(speculative).await?.into_iter().zip(&guessed).filter(|(_, offset)| **offset < total).map(|(page, _)| page));
+        let offsets: Vec<u64> = (1..).map(|page| page * QUEUE_PAGE_SIZE).take_while(|offset| *offset < total).filter(|offset| !guessed.contains(offset)).collect();
+        for batch in offsets.chunks(SEARCH_PAGE_CONCURRENCY) {
+            pages.extend(join_pages(batch.iter().map(|offset| spawn_page(&query, &q, *offset)).collect()).await?);
+        }
+        return Ok(pages);
+    }
+    speculative.iter().for_each(|handle| handle.abort());
+    let mut cursor = end_cursor;
+    while let Some(after) = cursor {
+        let page = search_page(&query, &q, Some(&after)).await?;
+        let info = &page["data"]["search"]["pageInfo"];
+        cursor = if info["hasNextPage"].as_bool().unwrap_or(false) { info["endCursor"].as_str().map(str::to_string) } else { None };
+        pages.push(page);
+    }
+    Ok(pages)
+}
 
 #[tauri::command]
-async fn queue(kind: QueueKind) -> Result<String, String> {
+async fn queue(kind: QueueKind, expected: Option<u64>) -> Result<String, String> {
     let query = format!(
         "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {QUEUE_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_FIELDS} }} }} }}"
     );
-    gh(&["api", "graphql", "--paginate", "--slurp", "-f", &format!("query={query}"), "-f", &format!("q={}", search_query(kind))]).await
+    let pages = search_pages(query, search_query(kind).to_string(), expected.unwrap_or(0)).await?;
+    serde_json::to_string(&pages).map_err(|error| error.to_string())
 }
 
 fn is_node_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '='))
 }
 
-#[tauri::command]
-async fn merge_states(ids: Vec<String>) -> Result<String, String> {
+async fn nodes_query(query: &str, ids: &[String]) -> Result<String, String> {
     if ids.is_empty() || ids.len() > MAX_MERGE_STATE_IDS || !ids.iter().all(|id| is_node_id(id)) {
         return Err("invalid pull request ids".to_string());
     }
-    let query = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest { id mergeable mergeStateStatus } } }";
     let mut args: Vec<String> = vec!["api".into(), "graphql".into(), "-f".into(), format!("query={query}")];
-    for id in &ids {
+    for id in ids {
         args.push("-f".into());
         args.push(format!("ids[]={id}"));
     }
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     gh(&borrowed).await
+}
+
+#[tauri::command]
+async fn merge_states(ids: Vec<String>) -> Result<String, String> {
+    nodes_query("query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest { id mergeable mergeStateStatus } } }", &ids).await
+}
+
+/// The same fields as a queue row, for a few pull requests by id: how one PR refreshes without its whole queue.
+#[tauri::command]
+async fn pulls(ids: Vec<String>) -> Result<String, String> {
+    nodes_query(&format!("query($ids: [ID!]!) {{ nodes(ids: $ids) {{ {QUEUE_FIELDS} }} }}"), &ids).await
 }
 
 #[tauri::command]
@@ -389,7 +481,20 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_cursors_match_github() {
+        assert_eq!(search_cursor(25), "Y3Vyc29yOjI1");
+        assert_eq!(base64("a"), "YQ==");
+        assert_eq!(base64("ab"), "YWI=");
+        assert_eq!(base64("abc"), "YWJj");
+    }
 }

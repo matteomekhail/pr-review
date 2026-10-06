@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { PullActivity, PullRequest } from './github';
-import { describeAsk, inAskScope, reviewAsk } from './request';
+import { describeAsk, inAskScope, isStaleRequest, reviewAsk } from './request';
 
 const ME = 'me';
 const ENG = 'Acme/engineering';
@@ -77,5 +77,23 @@ describe('inAskScope', () => {
     expect([null, { to: 'me' as const }, team].map((ask) => inAskScope(ask, 'me'))).toEqual([true, true, false]);
     expect([null, { to: 'me' as const }, team].map((ask) => inAskScope(ask, 'team'))).toEqual([false, false, true]);
     expect([null, { to: 'me' as const }, team].map((ask) => inAskScope(ask, 'all'))).toEqual([true, true, true]);
+  });
+});
+
+describe('isStaleRequest', () => {
+  const reviewed = (requests: PullActivity['reviewRequests']): PullRequest => {
+    const base = pull('alice', requests);
+    return { ...base, activity: { ...base.activity, reviews: [{ state: 'APPROVED', at: '2026-09-25T10:00:00Z', author: { login: ME, avatarUrl: '', isBot: false } }] } };
+  };
+
+  test('stale once I reviewed and nobody asks me or my teams any more', () => {
+    expect(isStaleRequest(reviewed([team(DATA)]), ME, myTeams)).toBe(true);
+  });
+
+  test('still live when I am asked again, or have not reviewed, or my teams are unknown', () => {
+    expect(isStaleRequest(reviewed([user(ME)]), ME, myTeams)).toBe(false);
+    expect(isStaleRequest(reviewed([team(ENG)]), ME, myTeams)).toBe(false);
+    expect(isStaleRequest(pull('alice', []), ME, myTeams)).toBe(false);
+    expect(isStaleRequest(reviewed([]), ME, null)).toBe(false);
   });
 });

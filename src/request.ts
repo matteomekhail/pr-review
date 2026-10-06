@@ -1,4 +1,5 @@
 import type { PullRequest } from './github';
+import { verdictOf } from './approval';
 
 /** Who a review request reaches me through: my login, or teams I am in (`org/slug`; empty when GitHub did not say which). */
 export type ReviewAsk = { to: 'me' } | { to: 'team'; teams: string[] };
@@ -17,6 +18,15 @@ export function reviewAsk(pull: PullRequest, viewer: string | null, myTeams: Rea
   const mine = myTeams == null ? (isRequested ? teams : []) : teams.filter((team) => myTeams.has(team.toLowerCase()));
   if (mine.length > 0 || isRequested) return { to: 'team', teams: mine };
   return null;
+}
+
+/**
+ * GitHub's search index trails reviews by minutes, so `review-requested:@me` still lists a PR I just reviewed. Once
+ * I have reviewed it and the live request list names neither me nor my teams, the request is gone.
+ */
+export function isStaleRequest(pull: PullRequest, viewer: string | null, myTeams: ReadonlySet<string> | null): boolean {
+  if (myTeams == null || verdictOf(pull.activity.reviews, viewer) == null) return false;
+  return reviewAsk(pull, viewer, myTeams, false) == null;
 }
 
 /** Which review requests a list keeps: all, mine (dropping what is there only because a team was asked), or only team ones. */

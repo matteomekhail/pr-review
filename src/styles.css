@@ -345,6 +345,9 @@ img { -webkit-user-drag: none; }
 
 .filter-bar .sort { flex: none; max-width: 86px; }
 #list-pane.narrow .chip-count { display: none; }
+/* Five tabs need the room: under 520px the shortcuts button gives way (? still opens it). */
+#list-pane.compact #open-help { display: none; }
+#list-pane.compact .view-pills button { padding: 0 5px; gap: 3px; }
 
 .split-button select[hidden] { display: none; }
 .split-button select[hidden] ~ *, .split-button:has(select[hidden]) button.primary { border-radius: var(--radius); }
@@ -604,8 +607,8 @@ diffs-container { --diffs-dark-bg: var(--bg); --diffs-light-bg: var(--bg); }
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 #list-pane .pane-head .head-title { gap: 6px; min-width: 0; flex: 1; }
-.view-pills { display: flex; gap: 2px; min-width: 0; flex: 0 1 auto; -webkit-app-region: no-drag; }
-.view-pills button { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 7px; border: 0; border-radius: 999px; background: none; color: var(--text-3); font-size: 12px; font-weight: 500; white-space: nowrap; }
+.view-pills { display: flex; gap: 1px; min-width: 0; flex: 0 1 auto; -webkit-app-region: no-drag; }
+.view-pills button { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 6px; border: 0; border-radius: 999px; background: none; color: var(--text-3); font-size: 12px; font-weight: 500; white-space: nowrap; }
 .view-pills button:hover { background: var(--bg-hover); color: var(--text-2); }
 .view-pills button.active { background: var(--bg-active); color: var(--text); }
 .view-pills .count { margin: 0; color: var(--text-4); font-size: 11px; font-variant-numeric: tabular-nums; }

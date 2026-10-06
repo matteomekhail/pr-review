@@ -43,7 +43,15 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   readiness_available: () => false,
   review_context: () => { throw new Error('offline harness'); },
   readiness: () => { throw new Error('offline harness'); },
-  approve: () => 'ok',
+  // The demo remembers approvals the way GitHub does: my review is added and the requests it answers are dropped.
+  approve: (args) => {
+    const pull = pulls.find((candidate) => candidate.number === Number(args.number) && candidate.repository.nameWithOwner === String(args.repo));
+    if (pull == null || !IS_DEMO) return 'ok';
+    pull.reviews = { nodes: [...(pull.reviews?.nodes ?? []), { state: 'APPROVED', submittedAt: new Date().toISOString(), author: { login: DEMO_VIEWER, avatarUrl: '', __typename: 'User' } }] };
+    pull.reviewRequests = { nodes: (pull.reviewRequests?.nodes ?? []).filter(({ requestedReviewer: reviewer }) => reviewer?.login !== DEMO_VIEWER && !DEMO_TEAMS.includes(reviewer?.combinedSlug ?? '')) };
+    return 'ok';
+  },
+  pulls: (args) => JSON.stringify({ data: { nodes: (args.ids as string[]).map((id) => byId.get(id) ?? null) } }),
   merge: async (args) => {
     await new Promise((resolve) => setTimeout(resolve, Number(new URLSearchParams(location.search).get('mergeMs') ?? 0)));
     const failing = (new URLSearchParams(location.search).get('failMerge') ?? '').split(',').filter(Boolean).map(Number);
