@@ -424,10 +424,10 @@ function mergedAuthorLabel(author: string): string {
   return author === '' ? 'Everyone' : author === '@me' ? 'Me' : author;
 }
 
-/** The selector names the filters in effect, or All; on Merged, the period and author. */
+/** The selector names the filters in effect, or All; on Merged, the period and author. The repository goes last, so a long name is what gets cut. */
 function sliceLabel(): string {
   if (state.kind === 'merged') return `${MERGED_PERIODS[state.mergedPeriod]} · ${mergedAuthorLabel(state.mergedAuthor)}`;
-  const parts = [state.repoFilter === '' ? '' : (state.repoFilter.split('/')[1] ?? state.repoFilter), hasAskScope(state.kind) && state.askScope !== 'all' ? ASK_LABELS[state.askScope] : '', state.smartFilter === 'all' ? '' : SMART_LABELS[state.smartFilter]];
+  const parts = [hasAskScope(state.kind) && state.askScope !== 'all' ? ASK_LABELS[state.askScope] : '', state.smartFilter === 'all' ? '' : SMART_LABELS[state.smartFilter], state.repoFilter === '' ? '' : (state.repoFilter.split('/')[1] ?? state.repoFilter)];
   return parts.filter((part) => part !== '').join(' · ') || 'All';
 }
 
