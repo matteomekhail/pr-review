@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { PullActivity, PullRequest } from './github';
-import { describeAsk, reviewAsk } from './request';
+import { describeAsk, inAskScope, reviewAsk } from './request';
 
 const ME = 'me';
 const ENG = 'Acme/engineering';
@@ -68,5 +68,14 @@ describe('labels', () => {
     expect(describeAsk({ to: 'me' })).toBe('Review requested from you by name');
     expect(describeAsk({ to: 'team', teams: [ENG, DATA] })).toBe('Review requested from @Acme/engineering, @Acme/data');
     expect(describeAsk({ to: 'team', teams: [] })).toBe('Review requested from a team you are in');
+  });
+});
+
+describe('inAskScope', () => {
+  test('me keeps everything but team-only requests; team keeps only those', () => {
+    const team = { to: 'team' as const, teams: [ENG] };
+    expect([null, { to: 'me' as const }, team].map((ask) => inAskScope(ask, 'me'))).toEqual([true, true, false]);
+    expect([null, { to: 'me' as const }, team].map((ask) => inAskScope(ask, 'team'))).toEqual([false, false, true]);
+    expect([null, { to: 'me' as const }, team].map((ask) => inAskScope(ask, 'all'))).toEqual([true, true, true]);
   });
 });

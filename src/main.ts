@@ -25,7 +25,7 @@ import { invalidateConversation, loadConversation, type ConversationItem } from 
 import { isReady, isRecent, isSmall, matchesSmartFilter, sortPulls, type SmartFilter, type SortOrder } from './smart';
 import { assessReadiness, isReadinessAvailable, type ReadinessResult } from './readiness';
 import { computeTurn, type Turn } from './turn';
-import { describeAsk, reviewAsk, type ReviewAsk } from './request';
+import { describeAsk, inAskScope, reviewAsk, type AskScope, type ReviewAsk } from './request';
 import { botReviews, describeBotReview } from './review-bots';
 
 interface State {
@@ -34,6 +34,7 @@ interface State {
   filter: string;
   smartFilter: SmartFilter;
   repoFilter: string;
+  askScope: AskScope;
   sortOrder: SortOrder;
   checkedIds: Set<string>;
   selectedId: string | null;
@@ -79,6 +80,7 @@ const dom = {
   sort: element<HTMLSelectElement>('sort'),
   smartFilter: element<HTMLSelectElement>('smart-filter'),
   repoFilter: element<HTMLSelectElement>('repo-filter'),
+  askFilter: element<HTMLSelectElement>('ask-filter'),
   bulkBar: element('bulk-bar'),
   bulkCount: element('bulk-count'),
   bulkMerge: element<HTMLButtonElement>('bulk-merge'),
@@ -103,8 +105,9 @@ const state: State = {
   kind: 'mine',
   pulls: [],
   filter: '',
-  smartFilter: ((['all', 'ready', 'attention', 'waiting', 'direct', 'team', 'small', 'recent', 'tested'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
+  smartFilter: ((['all', 'ready', 'attention', 'waiting', 'small', 'recent', 'tested'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
   repoFilter: localStorage.getItem('repoFilter') ?? '',
+  askScope: (['me', 'team'] as const).find((scope) => scope === localStorage.getItem('askScope')) ?? 'all',
   sortOrder: (localStorage.getItem('sortOrder') as SortOrder | null) ?? 'smart',
   checkedIds: new Set<string>(),
   selectedId: null,
@@ -331,7 +334,7 @@ async function fetchTurnQueue(): Promise<PullRequest[]> {
 }
 
 function currentListKey(): string {
-  return [listVersion, leaving.size, state.pulls, state.filter, state.smartFilter, state.repoFilter, state.sortOrder, isGrouped, groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
+  return [listVersion, leaving.size, state.pulls, state.filter, state.smartFilter, state.repoFilter, state.askScope, state.sortOrder, isGrouped, groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
 }
 
 const objectIds = new WeakMap<object, number>();
@@ -352,12 +355,20 @@ function withLeaving(ranked: PullRequest[]): PullRequest[] {
   return [...ranked, ...[...leaving.values()].filter((entry) => !present.has(entry.pull.id)).map((entry) => entry.pull)];
 }
 
-/** The repository and smart filters, shared by the list and the tab counts; text search is left to the list. */
-function matchesFilters(pull: PullRequest, now: number): boolean {
+/** My own PRs have no review requests to scope, so the scope menu neither shows nor applies there. */
+function hasAskScope(kind: QueueKind): boolean {
+  return kind !== 'mine';
+}
+
+function matchesAskScope(pull: PullRequest, kind: QueueKind): boolean {
+  return !hasAskScope(kind) || inAskScope(askFor(pull), state.askScope);
+}
+
+/** The repository, review-request and smart filters, shared by the list and the tab counts; text search is left to the list. */
+function matchesFilters(pull: PullRequest, now: number, kind: QueueKind = state.kind): boolean {
   if (state.repoFilter !== '' && pull.repository.nameWithOwner !== state.repoFilter) return false;
+  if (!matchesAskScope(pull, kind)) return false;
   if (state.smartFilter === 'waiting') return turnFor(pull)?.whose === 'theirs';
-  if (state.smartFilter === 'direct') return askFor(pull)?.to === 'me';
-  if (state.smartFilter === 'team') return askFor(pull)?.to === 'team';
   if (state.smartFilter === 'attention') return isMergeStateSettled(pull) && needsAttention(pull);
   if (state.smartFilter === 'tested') return isTested(pull);
   return matchesSmartFilter(pull, state.smartFilter, now);
@@ -368,6 +379,11 @@ function repoPulls(): PullRequest[] {
   return state.repoFilter === '' ? state.pulls : state.pulls.filter((pull) => pull.repository.nameWithOwner === state.repoFilter);
 }
 
+/** The current queue narrowed to the chosen repository and review requests: what the smart filters count from. */
+function scopedPulls(): PullRequest[] {
+  return repoPulls().filter((pull) => matchesAskScope(pull, state.kind));
+}
+
 function computeLists(): void {
   const key = currentListKey();
   if (key === listCacheKey) return;
@@ -376,7 +392,7 @@ function computeLists(): void {
   const now = Date.now();
   const matching = state.pulls.filter((pull) => matchesFilters(pull, now) && matchesText(pull, needle));
   const ranked = sortPulls(matching, state.sortOrder, now, aiScoreFor);
-  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.repoFilter, state.smartFilter, state.sortOrder, needle, isGrouped].join('|'));
+  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.repoFilter, state.askScope, state.smartFilter, state.sortOrder, needle, isGrouped].join('|'));
   visibleCache = !isGrouped || groups.length === 0 ? filteredCache : listSections(filteredCache).flatMap((section) => (section.group != null && collapsedGroups.has(section.group.id) ? [] : section.pulls));
 }
 
@@ -406,14 +422,17 @@ function fitSelectWidth(select: HTMLSelectElement): void {
 let smartCountsSource: PullRequest[] | null = null;
 let lastStatesVersion = -1;
 let lastRepoFilter: string | null = null;
+let lastAskScope: AskScope | null = null;
 
 function renderSmartCounts(): void {
-  if (smartCountsSource === state.pulls && lastStatesVersion === listVersion && lastRepoFilter === state.repoFilter && dom.sort.value === state.sortOrder && dom.smartFilter.value === state.smartFilter) return;
+  if (smartCountsSource === state.pulls && lastStatesVersion === listVersion && lastRepoFilter === state.repoFilter && lastAskScope === state.askScope && dom.sort.value === state.sortOrder && dom.smartFilter.value === state.smartFilter) return;
   smartCountsSource = state.pulls;
   lastStatesVersion = listVersion;
   lastRepoFilter = state.repoFilter;
+  lastAskScope = state.askScope;
   renderRepoOptions();
-  const pulls = repoPulls();
+  renderAskOptions();
+  const pulls = scopedPulls();
   const now = Date.now();
   const counts: Record<SmartFilter, number> = {
     all: pulls.length,
@@ -423,8 +442,6 @@ function renderSmartCounts(): void {
     attention: pulls.filter((pull) => isMergeStateSettled(pull) && needsAttention(pull)).length,
     tested: pulls.filter(isTested).length,
     waiting: pulls.filter((pull) => turnFor(pull)?.whose === 'theirs').length,
-    direct: pulls.filter((pull) => askFor(pull)?.to === 'me').length,
-    team: pulls.filter((pull) => askFor(pull)?.to === 'team').length,
   };
   for (const option of dom.smartFilter.options) option.textContent = `${option.dataset.label ?? option.value} · ${counts[option.value as SmartFilter]}`;
   dom.smartFilter.value = state.smartFilter;
@@ -446,6 +463,27 @@ function renderRepoOptions(): void {
   dom.repoFilter.value = state.repoFilter;
   dom.repoFilter.classList.toggle('active', state.repoFilter !== '');
   fitSelectWidth(dom.repoFilter);
+}
+
+function renderAskOptions(): void {
+  dom.askFilter.hidden = !hasAskScope(state.kind);
+  if (dom.askFilter.hidden) return;
+  const pulls = repoPulls();
+  const team = pulls.filter((pull) => askFor(pull)?.to === 'team').length;
+  const counts: Record<AskScope, number> = { all: pulls.length, me: pulls.length - team, team };
+  for (const option of dom.askFilter.options) option.textContent = `${option.dataset.label ?? option.value} · ${counts[option.value as AskScope]}`;
+  dom.askFilter.value = state.askScope;
+  dom.askFilter.classList.toggle('active', state.askScope !== 'all');
+  fitSelectWidth(dom.askFilter);
+}
+
+/** Picking the scope already shown goes back to both, like the smart filters. */
+function setAskScope(scope: AskScope): void {
+  state.askScope = state.askScope === scope && scope !== 'all' ? 'all' : scope;
+  localStorage.setItem('askScope', state.askScope);
+  renderList();
+  const first = visiblePulls()[0];
+  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
 }
 
 function setRepoFilter(repo: string): void {
@@ -539,7 +577,7 @@ function renderCounts(): void {
   const now = Date.now();
   document.querySelectorAll<HTMLElement>('[data-count]').forEach((badge) => {
     const pulls = queueCache.get(badge.dataset.count as QueueKind);
-    badge.textContent = pulls == null ? '' : String(pulls.filter((pull) => matchesFilters(pull, now)).length);
+    badge.textContent = pulls == null ? '' : String(pulls.filter((pull) => matchesFilters(pull, now, badge.dataset.count as QueueKind)).length);
   });
 }
 
@@ -700,13 +738,15 @@ function renderListEmpty(count: number, needle: string): void {
   const isSearching = needle !== '' && isSemanticLoading;
   const isAwaiting = count === 0 && state.pulls.length > 0 && isAwaitingMergeStates();
   const kind = count > 0 || isBooting ? '' : isSearching ? 'searching' : isAwaiting ? 'checking' : state.pulls.length === 0 ? 'empty' : needle !== '' ? 'no-results' : 'filtered';
-  const filterLabel = state.smartFilter === 'ready' ? 'Ready' : state.smartFilter === 'attention' ? 'Unready' : state.smartFilter === 'direct' ? 'requested from you' : state.smartFilter === 'team' ? 'requested from your teams' : state.smartFilter;
+  const filterLabel = state.smartFilter === 'ready' ? 'Ready' : state.smartFilter === 'attention' ? 'Unready' : state.smartFilter;
   const repoLabel = state.repoFilter.split('/')[1] ?? state.repoFilter;
-  const signature = [kind, filterLabel, repoLabel, needle].join('|');
+  const scope = hasAskScope(state.kind) ? state.askScope : 'all';
+  const signature = [kind, filterLabel, repoLabel, scope, needle].join('|');
   if (box.dataset.signature === signature) return;
   box.dataset.kind = kind;
   box.dataset.signature = signature;
-  const filteredTitle = repoLabel === '' ? `Nothing is ${escapeHtml(filterLabel)} right now` : state.smartFilter === 'all' ? `No pull requests in ${escapeHtml(repoLabel)} here` : `Nothing in ${escapeHtml(repoLabel)} is ${escapeHtml(filterLabel)} right now`;
+  const scopeTitle = scope === 'me' ? 'Nothing here for you alone right now' : 'No team review requests here right now';
+  const filteredTitle = scope !== 'all' && state.smartFilter === 'all' ? scopeTitle : repoLabel === '' ? `Nothing is ${escapeHtml(filterLabel)} right now` : state.smartFilter === 'all' ? `No pull requests in ${escapeHtml(repoLabel)} here` : `Nothing in ${escapeHtml(repoLabel)} is ${escapeHtml(filterLabel)} right now`;
   const views: Record<string, string> = {
     searching: `${icon('search', 'empty-ico')}<b>Searching…</b><span>Looking for “${escapeHtml(needle)}”</span><div class="empty-skel"><span></span><span></span><span></span></div>`,
     checking: `<div class="empty-overlay"><b>Checking merge status…</b><span>Asking GitHub which PRs are ready to merge</span></div>`,
@@ -2155,8 +2195,8 @@ const COMMANDS: Command[] = [
   { id: 'smart-small', section: 'Filter', title: 'Show small diffs', aliases: 'tiny quick', keys: ['⌥2'], run: () => setSmartFilter('small') },
   { id: 'smart-recent', section: 'Filter', title: 'Show recently updated', aliases: 'new fresh', keys: ['⌥3'], run: () => setSmartFilter('recent') },
   { id: 'smart-tested', section: 'Filter', title: 'Show end-to-end tested', aliases: 'e2e verified qa proof screenshots recording', keys: ['⌥5'], run: () => setSmartFilter('tested') },
-  { id: 'smart-direct', section: 'Filter', title: 'Show reviews requested from me by name', aliases: 'direct personal me asked mine', keys: ['⌥6'], run: () => setSmartFilter('direct') },
-  { id: 'smart-team', section: 'Filter', title: 'Show reviews requested from my teams', aliases: 'team group codeowners engineering', keys: ['⌥7'], run: () => setSmartFilter('team') },
+  { id: 'ask-me', section: 'Filter', title: 'Only me: hide PRs here only because my team was asked', aliases: 'direct personal mine review requests scope', keys: ['⌥6'], run: () => setAskScope('me') },
+  { id: 'ask-team', section: 'Filter', title: 'Only team: review requests to my teams', aliases: 'team group codeowners engineering scope', keys: ['⌥7'], run: () => setAskScope('team') },
   { id: 'smart-attention', section: 'Filter', title: 'Show PRs that need attention', aliases: 'unapproved conflicts failing blocked red yellow triage', keys: ['⌥4'], run: () => setSmartFilter('attention') },
   { id: 'group', section: 'Filter', title: 'Group related work', aliases: 'cluster effort category batch smart group', keys: ['⇧t'], run: toggleGrouping },
   { id: 'regroup', section: 'Filter', title: 'Regroup', aliases: 'refresh groups cluster', keys: [], run: () => { groupsSignature = ''; localStorage.removeItem(GROUPS_CACHE_KEY); void ensureGroups(true); } },
@@ -2331,6 +2371,7 @@ element('list-empty').addEventListener('click', (event) => {
     dom.filter.dispatchEvent(new Event('input', { bubbles: true }));
   } else if (action === 'show-all') {
     if (state.repoFilter !== '') setRepoFilter('');
+    if (state.askScope !== 'all') setAskScope('all');
     if (state.smartFilter !== 'all') setSmartFilter('all');
   }
 });
@@ -2354,6 +2395,10 @@ systemDark.addEventListener('change', () => themeId === SYSTEM_THEME_ID && apply
 dom.repoFilter.addEventListener('change', () => {
   setRepoFilter(dom.repoFilter.value);
   dom.repoFilter.blur();
+});
+dom.askFilter.addEventListener('change', () => {
+  setAskScope(dom.askFilter.value as AskScope);
+  dom.askFilter.blur();
 });
 dom.smartFilter.addEventListener('change', () => {
   setSmartFilter(dom.smartFilter.value as SmartFilter);

@@ -30,13 +30,16 @@
           <select id="repo-filter" class="sort filter-select" title="Filter by repository">
             <option value="">All repos</option>
           </select>
-          <select id="smart-filter" class="sort filter-select" title="Filter  ⌥0–⌥7">
+          <select id="ask-filter" class="sort filter-select" title="Review requests: mine, my teams' or both  ⌥6 / ⌥7">
+            <option value="all" data-label="Me + team">Me + team</option>
+            <option value="me" data-label="Only me">Only me</option>
+            <option value="team" data-label="Only team">Only team</option>
+          </select>
+          <select id="smart-filter" class="sort filter-select" title="Filter  ⌥0–⌥5">
             <option value="all" data-label="All">All</option>
             <option value="ready" data-label="Ready">Ready</option>
             <option value="attention" data-label="Unready">Unready</option>
             <option value="waiting" data-label="Waiting">Waiting</option>
-            <option value="direct" data-label="For me">For me</option>
-            <option value="team" data-label="Team">Team</option>
             <option value="small" data-label="Small">Small</option>
             <option value="recent" data-label="Recent">Recent</option>
             <option value="tested" data-label="Tested">Tested</option>

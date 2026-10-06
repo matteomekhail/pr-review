@@ -19,6 +19,13 @@ export function reviewAsk(pull: PullRequest, viewer: string | null, myTeams: Rea
   return null;
 }
 
+/** Which review requests a list keeps: all, mine (dropping what is there only because a team was asked), or only team ones. */
+export type AskScope = 'all' | 'me' | 'team';
+
+export function inAskScope(ask: ReviewAsk | null, scope: AskScope): boolean {
+  return scope === 'all' || (ask?.to === 'team') === (scope === 'team');
+}
+
 export function describeAsk(ask: ReviewAsk): string {
   if (ask.to === 'me') return 'Review requested from you by name';
   if (ask.teams.length === 0) return 'Review requested from a team you are in';
