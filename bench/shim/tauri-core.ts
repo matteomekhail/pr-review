@@ -51,6 +51,16 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     pull.reviewRequests = { nodes: (pull.reviewRequests?.nodes ?? []).filter(({ requestedReviewer: reviewer }) => reviewer?.login !== DEMO_VIEWER && !DEMO_TEAMS.includes(reviewer?.combinedSlug ?? '')) };
     return 'ok';
   },
+  // Every fixture, merged a few hours apart by one of four people, so the Merged tab has periods and authors to filter.
+  merged: (args) => {
+    const authors = ['sam-rivera', 'jordan-lee', 'alex-kim', 'priya-n'];
+    const viewerLogin = IS_DEMO ? DEMO_VIEWER : 'someone-else';
+    const nodes = pulls
+      .map((pull, index) => ({ ...pull, id: `${pull.id}-merged`, number: pull.number - 1000, mergedAt: new Date(Date.now() - (index * 5 + 1) * 3_600_000).toISOString(), mergedBy: { login: 'sam-rivera' }, author: { login: authors[index % authors.length] as string, avatarUrl: '' }, commits: undefined, reviewRequests: undefined, reviews: undefined, comments: undefined, reviewDecision: undefined, mergeQueueEntry: undefined }))
+      .filter((pull) => Date.parse(pull.mergedAt) >= Date.parse(String(args.since)))
+      .filter((pull) => args.author == null || pull.author.login === (args.author === '@me' ? viewerLogin : args.author));
+    return JSON.stringify([{ data: { search: { issueCount: nodes.length, nodes } } }]);
+  },
   pulls: (args) => JSON.stringify({ data: { nodes: (args.ids as string[]).map((id) => byId.get(id) ?? null) } }),
   merge: async (args) => {
     await new Promise((resolve) => setTimeout(resolve, Number(new URLSearchParams(location.search).get('mergeMs') ?? 0)));

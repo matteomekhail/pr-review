@@ -5,7 +5,7 @@ import { decisionFromVerdicts } from './approval';
 /** A GitHub search behind a queue. */
 export type SearchKind = 'review' | 'mine' | 'involved' | 'reviewed';
 /** A tab: built from one or more searches (see QUEUE_SEARCHES in main.ts). */
-export type QueueKind = Exclude<SearchKind, 'reviewed'> | 'turn' | 'approved';
+export type QueueKind = Exclude<SearchKind, 'reviewed'> | 'turn' | 'approved' | 'merged';
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
 export type MergeableState = 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
 export type CheckState = 'SUCCESS' | 'FAILURE' | 'ERROR' | 'PENDING' | 'EXPECTED';
@@ -57,6 +57,8 @@ export interface PullRequest {
   repository: { nameWithOwner: string };
   checkState: CheckState | null;
   failingChecks: FailingCheck[];
+  mergedAt: string | null;
+  mergedBy: string | null;
   queueEntry: { position: number; state: string } | null;
   activity: PullActivity;
 }
@@ -73,9 +75,13 @@ interface RawAuthor {
   __typename?: string;
 }
 
-interface RawPullRequest extends Omit<PullRequest, 'checkState' | 'failingChecks' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'activity'> {
-  mergeQueueEntry: { position: number; state: string } | null;
-  commits: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: CheckState; contexts?: { nodes: RawCheckContext[] } } | null } }[] };
+/** A search node. Merged searches leave out the costly fields (decision, checks, activity, queue entry). */
+interface RawPullRequest extends Omit<PullRequest, 'reviewDecision' | 'checkState' | 'failingChecks' | 'mergedAt' | 'mergedBy' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'activity'> {
+  reviewDecision?: PullRequest['reviewDecision'];
+  mergedAt?: string | null;
+  mergedBy?: { login: string } | null;
+  mergeQueueEntry?: { position: number; state: string } | null;
+  commits?: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: CheckState; contexts?: { nodes: RawCheckContext[] } } | null } }[] };
   reviewRequests?: { nodes: { requestedReviewer: { __typename: string; login?: string; name?: string; combinedSlug?: string } | null }[] };
   reviews?: { nodes: { state: ReviewState; submittedAt: string | null; author: RawAuthor | null }[] };
   comments?: { nodes: { createdAt: string; author: RawAuthor | null }[] };
@@ -104,7 +110,7 @@ function toFailingChecks(contexts: readonly RawCheckContext[]): FailingCheck[] {
 }
 
 interface QueuePage {
-  data?: { search: { nodes: (RawPullRequest | Record<string, never>)[] } };
+  data?: { search: { issueCount?: number; nodes: (RawPullRequest | Record<string, never>)[] } };
   errors?: { message: string }[];
 }
 
@@ -118,23 +124,23 @@ function toActor(author: RawAuthor): Actor {
 
 function toActivity({ commits, reviewRequests, reviews, comments }: RawPullRequest): PullActivity {
   return {
-    lastCommitAt: commits.nodes[0]?.commit.committedDate ?? null,
+    lastCommitAt: commits?.nodes[0]?.commit.committedDate ?? null,
     reviewRequests: (reviewRequests?.nodes ?? []).flatMap(({ requestedReviewer: reviewer }) => {
       const name = reviewer?.login ?? reviewer?.combinedSlug ?? reviewer?.name;
       return name == null ? [] : [{ name, isTeam: reviewer?.__typename === 'Team' }];
     }),
     reviews: (reviews?.nodes ?? []).flatMap((review) => (review.author == null || review.submittedAt == null ? [] : [{ state: review.state, at: review.submittedAt, author: toActor(review.author) }])),
     comments: (comments?.nodes ?? []).flatMap((comment) => (comment.author == null ? [] : [{ at: comment.createdAt, author: toActor(comment.author) }])),
-    checks: (commits.nodes[0]?.commit.statusCheckRollup?.contexts?.nodes ?? []).flatMap((check) => (check.name == null || check.status == null || !isReviewBotCheck(check.name) ? [] : [{ name: check.name, status: check.status, conclusion: check.conclusion ?? null }])),
+    checks: (commits?.nodes[0]?.commit.statusCheckRollup?.contexts?.nodes ?? []).flatMap((check) => (check.name == null || check.status == null || !isReviewBotCheck(check.name) ? [] : [{ name: check.name, status: check.status, conclusion: check.conclusion ?? null }])),
   };
 }
 
 function toPullRequest(raw: RawPullRequest): PullRequest {
-  const { commits, mergeQueueEntry, reviewRequests: _requests, reviews: _reviews, comments: _comments, ...pull } = raw;
-  const rollup = commits.nodes[0]?.commit.statusCheckRollup;
+  const { commits, mergeQueueEntry, mergedBy, reviewRequests: _requests, reviews: _reviews, comments: _comments, ...pull } = raw;
+  const rollup = commits?.nodes[0]?.commit.statusCheckRollup;
   const activity = toActivity(raw);
   const reviewDecision = pull.reviewDecision ?? decisionFromVerdicts(pull.author?.login ?? null, activity.reviews);
-  return { ...pull, reviewDecision, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: rollup?.state ?? null, failingChecks: toFailingChecks(rollup?.contexts?.nodes ?? []), activity };
+  return { ...pull, reviewDecision, mergedAt: pull.mergedAt ?? null, mergedBy: mergedBy?.login ?? null, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: rollup?.state ?? null, failingChecks: toFailingChecks(rollup?.contexts?.nodes ?? []), activity };
 }
 
 const MERGE_STATE_BATCH = 20;
@@ -158,17 +164,34 @@ export async function fetchMergeStates(ids: readonly string[], onBatch: (states:
 }
 
 /** `expected` is how many PRs the search had last time, so its pages can be asked for together. */
-export async function fetchQueue(kind: SearchKind, expected = 0): Promise<PullRequest[]> {
-  const parsed: QueuePage | QueuePage[] = JSON.parse(await invoke<string>('queue', { kind, expected }));
+/** A search's pull requests, and how many GitHub matched (it returns at most 1,000). */
+export interface SearchResult {
+  pulls: PullRequest[];
+  total: number;
+}
+
+function parsePages(raw: string): SearchResult {
+  const parsed: QueuePage | QueuePage[] = JSON.parse(raw);
   const pages = Array.isArray(parsed) ? parsed : [parsed];
   const failed = pages.find((page) => page.data == null);
   if (failed != null) throw new Error(failed.errors?.map((error) => error.message).join('; ') ?? 'Empty response');
   const seen = new Set<string>();
-  return pages
+  const pulls = pages
     .flatMap((page) => page.data?.search.nodes ?? [])
     .filter(isPullRequest)
     .filter((node) => !seen.has(node.id) && seen.add(node.id) != null)
     .map(toPullRequest);
+  return { pulls, total: pages[0]?.data?.search.issueCount ?? pulls.length };
+}
+
+/** `expected` is how many PRs the search had last time, so its pages can be asked for together. */
+export async function fetchQueue(kind: SearchKind, expected = 0): Promise<SearchResult> {
+  return parsePages(await invoke<string>('queue', { kind, expected }));
+}
+
+/** PRs merged since `since` in `orgs` (anything I was involved in when empty), by `author` when given (`@me` works). */
+export async function fetchMerged(since: string, orgs: readonly string[], author: string | null, expected = 0): Promise<SearchResult> {
+  return parsePages(await invoke<string>('merged', { since, orgs, author, expected }));
 }
 
 interface PullsResponse {

@@ -6,7 +6,7 @@ use tokio::process::Command;
 const QUEUE_FIELDS: &str = r#"
 ... on PullRequest {
   id number title url isDraft
-  createdAt updatedAt additions deletions changedFiles
+  createdAt updatedAt mergedAt additions deletions changedFiles
   headRefName headRefOid baseRefName reviewDecision
   mergeQueueEntry { position state }
   author { login avatarUrl }
@@ -16,6 +16,18 @@ const QUEUE_FIELDS: &str = r#"
   reviews(last: 20) { nodes { state submittedAt author { login avatarUrl __typename } } }
   comments(last: 20) { nodes { createdAt author { login avatarUrl __typename } } }
 }"#;
+
+/// Merged PRs need no review activity, checks, merge state or review decision. The decision is what makes search
+/// pages slow (a 100-PR page takes about 5s with it, 2s without), so these pages hold 100.
+const MERGED_FIELDS: &str = r#"
+... on PullRequest {
+  id number title url isDraft
+  createdAt updatedAt mergedAt mergedBy { login } additions deletions changedFiles
+  headRefName headRefOid baseRefName
+  author { login avatarUrl }
+  repository { nameWithOwner }
+}"#;
+const MERGED_PAGE_SIZE: u64 = 100;
 
 const MAX_MERGE_STATE_IDS: usize = 25;
 
@@ -106,7 +118,7 @@ fn search_query(kind: QueueKind) -> &'static str {
 const QUEUE_PAGE_SIZE: u64 = 25;
 /// GitHub search never returns more than this many results.
 const MAX_SEARCH_RESULTS: u64 = 1_000;
-const SEARCH_PAGE_CONCURRENCY: usize = 6;
+const SEARCH_PAGE_CONCURRENCY: usize = 8;
 
 fn base64(input: &str) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -156,8 +168,8 @@ async fn join_pages(handles: Vec<tauri::async_runtime::JoinHandle<Result<serde_j
 /// Every page of a search. `expected` is how many results it had last time: that many pages are asked for at once,
 /// beside the first, then any the search has since grown by. This leans on GitHub's cursors being base64
 /// `cursor:<offset>`; when the first page's cursor is not, the guesses are dropped and pages follow `endCursor`.
-async fn search_pages(query: String, q: String, expected: u64) -> Result<Vec<serde_json::Value>, String> {
-    let guessed: Vec<u64> = (1..SEARCH_PAGE_CONCURRENCY as u64).map(|page| page * QUEUE_PAGE_SIZE).take_while(|offset| *offset < expected.min(MAX_SEARCH_RESULTS)).collect();
+async fn search_pages(query: String, q: String, expected: u64, page_size: u64) -> Result<Vec<serde_json::Value>, String> {
+    let guessed: Vec<u64> = (1..SEARCH_PAGE_CONCURRENCY as u64).map(|page| page * page_size).take_while(|offset| *offset < expected.min(MAX_SEARCH_RESULTS)).collect();
     let speculative: Vec<_> = guessed.iter().map(|offset| spawn_page(&query, &q, *offset)).collect();
     let first = search_page(&query, &q, None).await?;
     let info = &first["data"]["search"];
@@ -168,9 +180,9 @@ async fn search_pages(query: String, q: String, expected: u64) -> Result<Vec<ser
     if !has_next {
         return Ok(pages);
     }
-    if end_cursor.as_deref() == Some(search_cursor(QUEUE_PAGE_SIZE).as_str()) {
+    if end_cursor.as_deref() == Some(search_cursor(page_size).as_str()) {
         pages.extend(join_pages(speculative).await?.into_iter().zip(&guessed).filter(|(_, offset)| **offset < total).map(|(page, _)| page));
-        let offsets: Vec<u64> = (1..).map(|page| page * QUEUE_PAGE_SIZE).take_while(|offset| *offset < total).filter(|offset| !guessed.contains(offset)).collect();
+        let offsets: Vec<u64> = (1..).map(|page| page * page_size).take_while(|offset| *offset < total).filter(|offset| !guessed.contains(offset)).collect();
         for batch in offsets.chunks(SEARCH_PAGE_CONCURRENCY) {
             pages.extend(join_pages(batch.iter().map(|offset| spawn_page(&query, &q, *offset)).collect()).await?);
         }
@@ -192,7 +204,32 @@ async fn queue(kind: QueueKind, expected: Option<u64>) -> Result<String, String>
     let query = format!(
         "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {QUEUE_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_FIELDS} }} }} }}"
     );
-    let pages = search_pages(query, search_query(kind).to_string(), expected.unwrap_or(0)).await?;
+    let pages = search_pages(query, search_query(kind).to_string(), expected.unwrap_or(0), QUEUE_PAGE_SIZE).await?;
+    serde_json::to_string(&pages).map_err(|error| error.to_string())
+}
+
+fn is_search_date(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 32 && value.chars().all(|character| character.is_ascii_digit() || matches!(character, '-' | ':' | 'T' | '+' | 'Z' | '.'))
+}
+
+/// Merged PRs since `since` (ISO 8601) in `orgs` (or anything I was involved in when none are known), by `author`
+/// when given (`@me` works). GitHub cannot sort by merge time, so the newest updates come first.
+#[tauri::command]
+async fn merged(since: String, orgs: Vec<String>, author: Option<String>, expected: Option<u64>) -> Result<String, String> {
+    if !is_search_date(&since) || orgs.len() > 10 || !orgs.iter().all(|org| is_safe_segment(org)) {
+        return Err("invalid merged search".to_string());
+    }
+    let author = author.filter(|login| !login.is_empty());
+    if author.as_deref().is_some_and(|login| login != "@me" && !is_safe_segment(login)) {
+        return Err("invalid author".to_string());
+    }
+    let scope = if orgs.is_empty() { "involves:@me".to_string() } else { orgs.iter().map(|org| format!("org:{org}")).collect::<Vec<_>>().join(" ") };
+    let by = author.map(|login| format!(" author:{login}")).unwrap_or_default();
+    let q = format!("is:pr is:merged merged:>={since} {scope}{by} sort:updated-desc");
+    let query = format!(
+        "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {MERGED_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {MERGED_FIELDS} }} }} }}"
+    );
+    let pages = search_pages(query, q, expected.unwrap_or(0), MERGED_PAGE_SIZE).await?;
     serde_json::to_string(&pages).map_err(|error| error.to_string())
 }
 
@@ -481,7 +518,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, merged, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }

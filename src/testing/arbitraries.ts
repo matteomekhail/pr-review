@@ -32,6 +32,8 @@ export const pullArbitrary: fc.Arbitrary<PullRequest> = fc.record({
   author: { login: 'author', avatarUrl: '' },
   repository: { nameWithOwner: repo },
   failingChecks: [],
+  mergedAt: null,
+  mergedBy: null,
   activity: { lastCommitAt: null, reviewRequests: [], reviews: [], comments: [], checks: [] },
 }));
 

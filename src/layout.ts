@@ -18,7 +18,7 @@ const MIN_CONTENT_WIDTH = 320;
 const KEYBOARD_STEP = 24;
 
 const PANES: Record<PaneId, PaneSpec> = {
-  list: { variable: '--list-w', defaultWidth: 460, minWidth: 260, side: 'left' },
+  list: { variable: '--list-w', defaultWidth: 470, minWidth: 260, side: 'left' },
   inspector: { variable: '--inspector-w', defaultWidth: 300, minWidth: 220, side: 'right' },
   description: { variable: '--desc-w', defaultWidth: 520, minWidth: 260, side: 'left' },
 };

@@ -48,7 +48,7 @@ function unique(names: string[]): string[] {
  * review is requested or the author moved since my last review or comment.
  */
 export function computeTurn(pull: PullRequest, viewer: string | null, isReviewRequested = false): Turn | null {
-  if (viewer == null || pull.isDraft) return null;
+  if (viewer == null || pull.isDraft || pull.mergedAt != null) return null;
   const me = viewer.toLowerCase();
   const author = pull.author?.login.toLowerCase() ?? '';
   const moves = humanMoves(pull);

@@ -14,10 +14,11 @@
             <h2 id="view-title" class="sr-only">Created by me</h2>
             <nav class="views view-pills h-scroll">
               <button data-kind="turn" title="Where the next move is yours  ⌘4">My turn <span class="count" data-count="turn"></span></button>
-              <button data-kind="mine" class="active" title="Created by me  ⌘3">Mine <span class="count" data-count="mine"></span></button>
+              <button data-kind="mine" class="active" title="Created by me  ⌘3">Mine <span class="count quiet" data-count="mine"></span></button>
               <button data-kind="review" title="Review requested  ⌘1">Review <span class="count" data-count="review"></span></button>
-              <button data-kind="involved" title="Involved  ⌘2">Involved <span class="count" data-count="involved"></span></button>
-              <button data-kind="approved" title="Open PRs you approved  ⌘5">Approved <span class="count" data-count="approved"></span></button>
+              <button data-kind="involved" title="Involved  ⌘2">Involved <span class="count quiet" data-count="involved"></span></button>
+              <button data-kind="approved" title="Open PRs you approved  ⌘5">Approved <span class="count quiet" data-count="approved"></span></button>
+              <button data-kind="merged" title="Merged pull requests, by period and author  ⌘6">Merged</button>
             </nav>
             <button id="refresh-button" class="icon-button refresh-button" title="Refresh  ⌘R"><i data-icon="refresh"></i></button>
             <button id="update-pill" class="update-pill" hidden title="Restart to update  ⌘⇧U"><i data-icon="refresh"></i>Update</button>
@@ -31,6 +32,14 @@
           <select id="repo-filter" class="sort filter-select" title="Filter by repository">
             <option value="">All repos</option>
           </select>
+          <select id="merged-period" class="sort filter-select" title="Merged since" hidden>
+            <option value="today">Today</option>
+            <option value="week">This week</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="90d">Last 90 days</option>
+          </select>
+          <select id="merged-author" class="sort filter-select" title="Who opened them" hidden></select>
           <select id="ask-filter" class="sort filter-select" title="Review requests: mine, my teams' or both  ⌥6 / ⌥7">
             <option value="all" data-label="Me + team">Me + team</option>
             <option value="me" data-label="Only me">Only me</option>

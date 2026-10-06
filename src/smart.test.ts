@@ -26,6 +26,8 @@ function pull(overrides: Partial<PullRequest>): PullRequest {
     repository: { nameWithOwner: 'o/r' },
     checkState: 'SUCCESS',
     failingChecks: [],
+    mergedAt: null,
+    mergedBy: null,
     queueEntry: null,
     activity: { lastCommitAt: null, reviewRequests: [], reviews: [], comments: [], checks: [] },
     ...overrides,

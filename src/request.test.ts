@@ -28,6 +28,8 @@ function pull(author: string, reviewRequests: PullActivity['reviewRequests']): P
     repository: { nameWithOwner: 'o/r' },
     checkState: 'SUCCESS',
     failingChecks: [],
+    mergedAt: null,
+    mergedBy: null,
     queueEntry: null,
     activity: { lastCommitAt: null, reviewRequests, reviews: [], comments: [], checks: [] },
   };
