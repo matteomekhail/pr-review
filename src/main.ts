@@ -89,6 +89,7 @@ const dom = {
   sliceLabel: element('slice-button').querySelector<HTMLElement>('.slice-label') as HTMLElement,
   sliceCount: element('slice-button').querySelector<HTMLElement>('.slice-count') as HTMLElement,
   sortButton: element<HTMLButtonElement>('sort-button'),
+  groupButton: element<HTMLButtonElement>('group-button'),
   bulkBar: element('bulk-bar'),
   bulkCount: element('bulk-count'),
   bulkMerge: element<HTMLButtonElement>('bulk-merge'),
@@ -435,6 +436,9 @@ function renderSlice(): void {
   dom.sliceLabel.textContent = sliceLabel();
   dom.sliceCount.textContent = String(filteredPulls().length);
   dom.sortButton.hidden = state.kind === 'merged';
+  dom.groupButton.hidden = state.kind === 'merged';
+  dom.groupButton.setAttribute('aria-pressed', String(isGrouped));
+  dom.groupButton.dataset.tip = `${isGrouped ? 'Ungroup' : 'Group related work'}  ⇧T`;
   sliceMenu.refresh();
   sortMenu.refresh();
 }
@@ -600,13 +604,26 @@ function checksIcon(pull: PullRequest): string {
   }
 }
 
-/** Jev's readiness score and its reason, in the open PR's header (rows stay quiet). */
-function readinessChip(pull: PullRequest): string {
+function readinessOf(pull: PullRequest): { percent: number; tone: 'ok' | 'wait' | 'bad'; reason: string } | null {
   const score = aiScoreFor(pull);
-  if (score == null) return '';
+  if (score == null) return null;
   const percent = Math.round(Math.max(0, Math.min(1, score)) * 100);
-  const toneName = percent >= 65 ? 'ok' : percent >= 40 ? 'wait' : 'bad';
-  const reason = aiResults.get(aiKey(pull))?.reason.trim() ?? '';
+  return { percent, tone: percent >= 65 ? 'ok' : percent >= 40 ? 'wait' : 'bad', reason: aiResults.get(aiKey(pull))?.reason.trim() ?? '' };
+}
+
+/** Jev's readiness score on a row, beside the age so the scores line up in a column. */
+function readinessBadge(pull: PullRequest): string {
+  const readiness = readinessOf(pull);
+  if (readiness == null) return '';
+  const { percent, tone, reason } = readiness;
+  return `<span class="ai-score ${tone}" title="${escapeHtml(reason === '' ? `Readiness ${percent}%` : `Readiness ${percent}% · ${reason}`)}">${percent}</span>`;
+}
+
+/** The same score with its reason, in the open PR's header. */
+function readinessChip(pull: PullRequest): string {
+  const readiness = readinessOf(pull);
+  if (readiness == null) return '';
+  const { percent, tone: toneName, reason } = readiness;
   return chip(`<b>${percent}</b>${reason === '' ? '' : `<span class="reason">${escapeHtml(reason)}</span>`}`, reason === '' ? `Readiness ${percent}%` : `Readiness ${percent}% · ${reason}`, `readiness tone-${toneName}`);
 }
 
@@ -794,7 +811,7 @@ function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: str
   return `<li data-key="${pull.id}" data-id="${pull.id}" class="${pull.id === state.selectedId ? 'selected' : ''}${isChecked ? ' checked' : ''}${pull.queueEntry != null ? ' queued' : ''}${exit != null ? ' leaving' : ''}${exit?.isPending === true ? ' pending' : ''}${failedMerges.has(pull.id) ? ' merge-failed' : ''}"${exit != null ? ` data-leaving="${escapeHtml(exit.label)}"` : ''}>
         <span class="lead">${statusIcon(pull)}<span class="check-box" data-check="${pull.id}" role="checkbox" aria-checked="${isChecked}" title="Select  E / ⇧V"></span></span>
         <span class="row-main">
-          <span class="row-top"><span class="t">${escapeHtml(pull.title)}</span>${turnMarker(pull)}${ageLabel(pull)}</span>
+          <span class="row-top"><span class="t">${escapeHtml(pull.title)}</span>${readinessBadge(pull)}${turnMarker(pull)}${ageLabel(pull)}</span>
           <span class="row-meta">${repoTag(pull, primaryRepo)}<span class="author">${escapeHtml(pull.author?.login ?? 'ghost')}</span><span class="sep">·</span><span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">#${pull.number}</span><span class="sep">·</span><span class="delta">+${pull.additions.toLocaleString('en')} −${pull.deletions.toLocaleString('en')}</span>${pull.queueEntry == null ? '' : `<span class="sep">·</span><span class="queued-note" title="${escapeHtml(queueLabel(pull))}">Queued #${pull.queueEntry.position + 1}</span>`}${checksIcon(pull)}<span class="grow"></span>${askTag(pull)}${botMarks(pull)}</span>
         </span>
       </li>`;
@@ -2753,6 +2770,7 @@ element('toggle-fullscreen').addEventListener('click', () => layout.toggleFocus(
 element('open-github').addEventListener('click', openSelectedOnGitHub);
 element('refresh-button').addEventListener('click', manualRefresh);
 dom.sliceButton.addEventListener('click', openSliceMenu);
+dom.groupButton.addEventListener('click', toggleGrouping);
 dom.sortButton.addEventListener('click', () => {
   sliceMenu.close();
   sortMenu.toggle(dom.sortButton, sortSections, 'end');

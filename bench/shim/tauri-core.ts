@@ -44,7 +44,7 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   viewer_teams: () => (IS_DEMO ? DEMO_TEAMS.join('\n') : ''),
   comment: (args) => `https://github.com/${String(args.repo)}/pull/${String(args.number)}#issuecomment-1`,
   merge_queue: () => JSON.stringify({ data: { repository: { mergeQueue: null } } }),
-  readiness_available: () => false,
+  readiness_available: () => new URLSearchParams(location.search).has('ai'),
   review_context: () => { throw new Error('offline harness'); },
   readiness: () => { throw new Error('offline harness'); },
   // The demo remembers approvals the way GitHub does: my review is added and the requests it answers are dropped.
