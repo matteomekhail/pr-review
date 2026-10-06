@@ -90,6 +90,7 @@ const dom = {
   sliceCount: element('slice-button').querySelector<HTMLElement>('.slice-count') as HTMLElement,
   sortButton: element<HTMLButtonElement>('sort-button'),
   groupButton: element<HTMLButtonElement>('group-button'),
+  fixButton: element<HTMLButtonElement>('fix-button'),
   bulkBar: element('bulk-bar'),
   bulkCount: element('bulk-count'),
   bulkMerge: element<HTMLButtonElement>('bulk-merge'),
@@ -437,6 +438,7 @@ function renderSlice(): void {
   dom.sliceCount.textContent = String(filteredPulls().length);
   dom.sortButton.hidden = state.kind === 'merged';
   dom.groupButton.hidden = state.kind === 'merged';
+  dom.fixButton.hidden = state.kind === 'merged';
   dom.groupButton.setAttribute('aria-pressed', String(isGrouped));
   dom.groupButton.dataset.tip = `${isGrouped ? 'Ungroup' : 'Group related work'}  ⇧T`;
   sliceMenu.refresh();
@@ -2771,6 +2773,7 @@ element('open-github').addEventListener('click', openSelectedOnGitHub);
 element('refresh-button').addEventListener('click', manualRefresh);
 dom.sliceButton.addEventListener('click', openSliceMenu);
 dom.groupButton.addEventListener('click', toggleGrouping);
+dom.fixButton.addEventListener('click', openTriage);
 dom.sortButton.addEventListener('click', () => {
   sliceMenu.close();
   sortMenu.toggle(dom.sortButton, sortSections, 'end');
