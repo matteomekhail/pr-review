@@ -16,7 +16,7 @@ export interface FixturePull {
   author: { login: string; avatarUrl: string };
   repository: { nameWithOwner: string };
   commits: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: string; contexts?: { nodes: { name: string; status: string; conclusion: string | null }[] } } | null } }[] };
-  reviewRequests?: { nodes: { requestedReviewer: { __typename: string; login?: string; name?: string } | null }[] };
+  reviewRequests?: { nodes: { requestedReviewer: { __typename: string; login?: string; name?: string; combinedSlug?: string } | null }[] };
   reviews?: { nodes: { state: string; submittedAt: string; author: { login: string; avatarUrl: string; __typename: string } }[] };
   comments?: { nodes: { createdAt: string; author: { login: string; avatarUrl: string; __typename: string } }[] };
 }

@@ -4,11 +4,11 @@ import { startAutoUpdate } from './updater';
 import { StableOrder } from './stable-order';
 import { watchKbdGlyphs } from './kbd-glyphs';
 import { animateDialogCancel, flash, glideScrollBy, glideScrollTo, setVisibleWithMotion } from './motion';
-import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, needsAttention, prStatus, type AttentionReason } from './status';
+import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, describeFailingChecks, isFailing, needsAttention, prStatus, type AttentionReason } from './status';
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, commentOnPull, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { approvePull, commentOnPull, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
 import { DiffView, parseDiff, type DiffStyle, type ParsedFile } from './diffs';
 import { sanitizeHtml } from './sanitize';
 import { CommandRegistry, renderShortcut, type Command } from './commands';
@@ -25,6 +25,7 @@ import { invalidateConversation, loadConversation, type ConversationItem } from 
 import { isReady, isRecent, isSmall, matchesSmartFilter, sortPulls, type SmartFilter, type SortOrder } from './smart';
 import { assessReadiness, isReadinessAvailable, type ReadinessResult } from './readiness';
 import { computeTurn, type Turn } from './turn';
+import { describeAsk, reviewAsk, type ReviewAsk } from './request';
 import { botReviews, describeBotReview } from './review-bots';
 
 interface State {
@@ -102,7 +103,7 @@ const state: State = {
   kind: 'mine',
   pulls: [],
   filter: '',
-  smartFilter: ((['all', 'ready', 'attention', 'waiting', 'small', 'recent', 'tested'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
+  smartFilter: ((['all', 'ready', 'attention', 'waiting', 'direct', 'team', 'small', 'recent', 'tested'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
   repoFilter: localStorage.getItem('repoFilter') ?? '',
   sortOrder: (localStorage.getItem('sortOrder') as SortOrder | null) ?? 'smart',
   checkedIds: new Set<string>(),
@@ -112,6 +113,8 @@ const state: State = {
 };
 
 let viewer: string | null = null;
+/** My teams as lower-case `org/slug`, once GitHub has told us. */
+let viewerTeams: Set<string> | null = null;
 const diffCache = new Map<string, Promise<ParsedFile[]>>();
 const queueCache = new Map<QueueKind, PullRequest[]>();
 let isSelectedQueued = false;
@@ -296,6 +299,20 @@ function turnFor(pull: PullRequest): Turn | null {
   return turn;
 }
 
+function askFor(pull: PullRequest): ReviewAsk | null {
+  return reviewAsk(pull, viewer, viewerTeams, reviewRequestedIds.has(pull.id));
+}
+
+function loadViewerTeams(): void {
+  void fetchViewerTeams().then((teams) => {
+    if (teams == null) return;
+    viewerTeams = teams;
+    resetTurns();
+    const pull = selectedPull();
+    if (pull != null) renderDetailMeta(pull);
+  });
+}
+
 function resetTurns(): void {
   turnCache = new WeakMap();
   invalidateList();
@@ -339,6 +356,8 @@ function withLeaving(ranked: PullRequest[]): PullRequest[] {
 function matchesFilters(pull: PullRequest, now: number): boolean {
   if (state.repoFilter !== '' && pull.repository.nameWithOwner !== state.repoFilter) return false;
   if (state.smartFilter === 'waiting') return turnFor(pull)?.whose === 'theirs';
+  if (state.smartFilter === 'direct') return askFor(pull)?.to === 'me';
+  if (state.smartFilter === 'team') return askFor(pull)?.to === 'team';
   if (state.smartFilter === 'attention') return isMergeStateSettled(pull) && needsAttention(pull);
   if (state.smartFilter === 'tested') return isTested(pull);
   return matchesSmartFilter(pull, state.smartFilter, now);
@@ -404,6 +423,8 @@ function renderSmartCounts(): void {
     attention: pulls.filter((pull) => isMergeStateSettled(pull) && needsAttention(pull)).length,
     tested: pulls.filter(isTested).length,
     waiting: pulls.filter((pull) => turnFor(pull)?.whose === 'theirs').length,
+    direct: pulls.filter((pull) => askFor(pull)?.to === 'me').length,
+    team: pulls.filter((pull) => askFor(pull)?.to === 'team').length,
   };
   for (const option of dom.smartFilter.options) option.textContent = `${option.dataset.label ?? option.value} · ${counts[option.value as SmartFilter]}`;
   dom.smartFilter.value = state.smartFilter;
@@ -460,7 +481,9 @@ function queueLabel(pull: PullRequest): string {
 
 function statusIcon(pull: PullRequest): string {
   const status = prStatus(pull);
-  return `<span class="status ${status.tone}" title="${escapeHtml(status.tone === 'queued' ? queueLabel(pull) : status.label)}"></span>`;
+  const failing = isFailing(pull) ? describeFailingChecks(pull) : '';
+  const label = status.tone === 'queued' ? queueLabel(pull) : failing === '' ? status.label : `${status.label} · ${failing}`;
+  return `<span class="status ${status.tone}" title="${escapeHtml(label)}"></span>`;
 }
 
 function checksIcon(pull: PullRequest): string {
@@ -469,7 +492,7 @@ function checksIcon(pull: PullRequest): string {
       return `<span class="check ok" title="Checks passed">${icon('check')}</span>`;
     case 'FAILURE':
     case 'ERROR':
-      return `<span class="check bad" title="Checks failed">${icon('x')}</span>`;
+      return `<span class="check bad" title="${escapeHtml(pull.failingChecks.length === 0 ? 'Checks failed' : `Failing: ${describeFailingChecks(pull)}`)}">${icon('x')}</span>`;
     case 'PENDING':
     case 'EXPECTED':
       return `<span class="check wait" title="Checks running">${icon('circleDashed')}</span>`;
@@ -485,7 +508,8 @@ function readinessDot(pull: PullRequest): string {
   if (score == null) return '';
   const percent = Math.round(Math.max(0, Math.min(1, score)) * 100);
   const toneName = percent >= 65 ? 'ok' : percent >= 40 ? 'wait' : 'bad';
-  return `<span class="ai-score ${toneName}" title="Readiness ${percent}%">${percent}</span>`;
+  const reason = aiResults.get(aiKey(pull))?.reason.trim() ?? '';
+  return `<span class="ai-score ${toneName}" title="${escapeHtml(reason === '' ? `Readiness ${percent}%` : `Readiness ${percent}% · ${reason}`)}">${percent}</span>`;
 }
 
 function avatar(pull: PullRequest): string {
@@ -638,6 +662,15 @@ function waitingLabel(turn: Extract<Turn, { whose: 'theirs' }>): string {
   return `Waiting on ${turn.waitingOn.map((name) => `@${name}`).join(', ')}`;
 }
 
+/** "You" when I am asked to review by name; a quiet team mark, named in its tooltip, when the request reaches me through a team. */
+function askTag(pull: PullRequest): string {
+  const ask = askFor(pull);
+  if (ask == null) return '';
+  const title = escapeHtml(describeAsk(ask));
+  if (ask.to === 'me') return `<span class="ask-tag me" title="${title}">${icon('user')}<span>You</span></span>`;
+  return `<span class="ask-tag team" title="${title}">${icon('users')}</span>`;
+}
+
 /** A fixed-width slot, empty when nobody has a turn, so rows stay aligned. */
 function turnMarker(pull: PullRequest): string {
   const turn = turnFor(pull);
@@ -652,7 +685,7 @@ function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: str
   return `<li data-key="${pull.id}" data-id="${pull.id}" class="${pull.id === state.selectedId ? 'selected' : ''}${isChecked ? ' checked' : ''}${pull.queueEntry != null ? ' queued' : ''}${exit != null ? ' leaving' : ''}${exit?.isPending === true ? ' pending' : ''}${failedMerges.has(pull.id) ? ' merge-failed' : ''}"${exit != null ? ` data-leaving="${escapeHtml(exit.label)}"` : ''}>
         <span class="check-box" data-check="${pull.id}" role="checkbox" aria-checked="${isChecked}" title="Select  E / ⇧V"></span>
         ${statusIcon(pull)}
-        <span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">${repoTag(pull, primaryRepo)}#${pull.number}</span>
+        <span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">${repoTag(pull, primaryRepo)}#${pull.number}${askTag(pull)}</span>
         <span class="t">${escapeHtml(pull.title)}</span>
         <span class="right">${pull.queueEntry != null ? `<span class="queue-pill" title="${escapeHtml(queueLabel(pull))}">Queued</span>` : ''}${readinessDot(pull)}${checksIcon(pull)}<span class="delta"><i class="add">+${pull.additions}</i> <i class="del">−${pull.deletions}</i></span>${turnMarker(pull)}<span class="age">${relativeTime(pull.updatedAt)}</span>${botMarks(pull)}${avatar(pull)}</span>
       </li>`;
@@ -665,7 +698,7 @@ function renderListEmpty(count: number, needle: string): void {
   const isSearching = needle !== '' && isSemanticLoading;
   const isAwaiting = count === 0 && state.pulls.length > 0 && isAwaitingMergeStates();
   const kind = count > 0 || isBooting ? '' : isSearching ? 'searching' : isAwaiting ? 'checking' : state.pulls.length === 0 ? 'empty' : needle !== '' ? 'no-results' : 'filtered';
-  const filterLabel = state.smartFilter === 'ready' ? 'Ready' : state.smartFilter === 'attention' ? 'Unready' : state.smartFilter;
+  const filterLabel = state.smartFilter === 'ready' ? 'Ready' : state.smartFilter === 'attention' ? 'Unready' : state.smartFilter === 'direct' ? 'requested from you' : state.smartFilter === 'team' ? 'requested from your teams' : state.smartFilter;
   const repoLabel = state.repoFilter.split('/')[1] ?? state.repoFilter;
   const signature = [kind, filterLabel, repoLabel, needle].join('|');
   if (box.dataset.signature === signature) return;
@@ -964,14 +997,23 @@ function turnChip(pull: PullRequest): string {
   return chip(`${icon('hourglass')}${escapeHtml(waitingLabel(turn))}`, waitingLabel(turn), 'plain turn-chip theirs');
 }
 
+function askChip(pull: PullRequest): string {
+  const ask = askFor(pull);
+  if (ask == null) return '';
+  const label = ask.to === 'me' ? 'Requested from you' : ask.teams.length === 0 ? 'Requested from your team' : `Requested from ${ask.teams.map((team) => `@${team}`).join(', ')}`;
+  return chip(`${icon(ask.to === 'me' ? 'user' : 'users')}${escapeHtml(label)}`, describeAsk(ask), `plain ask-chip ${ask.to}`);
+}
+
 function renderDetailMeta(pull: PullRequest): void {
   const checks = checksLabel(pull);
   const review = reviewLabel(pull);
   const merge = mergeState(pull);
-  const summary = [merge.label, review.tone === 'muted' ? '' : review.label, checks.tone === 'muted' ? '' : `Checks ${checks.label.toLowerCase()}`].filter((part) => part !== '').join(' · ');
+  const failing = isFailing(pull) ? describeFailingChecks(pull) : '';
+  const summary = [merge.label, review.tone === 'muted' ? '' : review.label, checks.tone === 'muted' ? '' : `Checks ${checks.label.toLowerCase()}${failing === '' ? '' : `: ${failing}`}`].filter((part) => part !== '').join(' · ');
   dom.statusBar.innerHTML = [
     chip(`${avatar(pull)}${escapeHtml(pull.author?.login ?? 'ghost')}`, 'Author', 'plain'),
     chip(`<code>${escapeHtml(pull.headRefName)}</code><span class="arrow">→</span><code>${escapeHtml(pull.baseRefName)}</code>`, `${pull.headRefName} → ${pull.baseRefName}`, 'plain branch'),
+    askChip(pull),
     turnChip(pull),
     `<span class="status-summary" title="${escapeHtml(summary)}">${statusIcon(pull)}</span>`,
   ].join('');
@@ -1422,6 +1464,7 @@ function refresh(kind: QueueKind, isForced = false): Promise<void> {
       if (kind === 'review') {
         reviewRequestedIds = new Set(pulls.map((pull) => pull.id));
         resetTurns();
+        if (viewerTeams == null) loadViewerTeams();
       }
       lastFetchedAt.set(kind, Date.now());
       const merged = pulls.map((pull) => mergeStateCache.get(pull.id)?.updatedAt === pull.updatedAt ? { ...pull, ...mergeStateCache.get(pull.id)?.state } : pull);
@@ -2110,6 +2153,8 @@ const COMMANDS: Command[] = [
   { id: 'smart-small', section: 'Filter', title: 'Show small diffs', aliases: 'tiny quick', keys: ['⌥2'], run: () => setSmartFilter('small') },
   { id: 'smart-recent', section: 'Filter', title: 'Show recently updated', aliases: 'new fresh', keys: ['⌥3'], run: () => setSmartFilter('recent') },
   { id: 'smart-tested', section: 'Filter', title: 'Show end-to-end tested', aliases: 'e2e verified qa proof screenshots recording', keys: ['⌥5'], run: () => setSmartFilter('tested') },
+  { id: 'smart-direct', section: 'Filter', title: 'Show reviews requested from me by name', aliases: 'direct personal me asked mine', keys: ['⌥6'], run: () => setSmartFilter('direct') },
+  { id: 'smart-team', section: 'Filter', title: 'Show reviews requested from my teams', aliases: 'team group codeowners engineering', keys: ['⌥7'], run: () => setSmartFilter('team') },
   { id: 'smart-attention', section: 'Filter', title: 'Show PRs that need attention', aliases: 'unapproved conflicts failing blocked red yellow triage', keys: ['⌥4'], run: () => setSmartFilter('attention') },
   { id: 'group', section: 'Filter', title: 'Group related work', aliases: 'cluster effort category batch smart group', keys: ['⇧t'], run: toggleGrouping },
   { id: 'regroup', section: 'Filter', title: 'Regroup', aliases: 'refresh groups cluster', keys: [], run: () => { groupsSignature = ''; localStorage.removeItem(GROUPS_CACHE_KEY); void ensureGroups(true); } },
@@ -2328,6 +2373,8 @@ window.addEventListener('focus', () => void refresh(state.kind));
 window.setInterval(() => {
   if (document.visibilityState === 'visible') void refresh(state.kind);
 }, QUEUE_REFRESH_MS);
+
+loadViewerTeams();
 
 void fetchViewerLogin().then((login) => {
   viewer = login;

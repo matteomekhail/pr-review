@@ -36,6 +36,7 @@ function pull(author: string, activity: Partial<PullActivity>, overrides: Partia
     author: person(author),
     repository: { nameWithOwner: 'o/r' },
     checkState: 'SUCCESS',
+    failingChecks: [],
     queueEntry: null,
     activity: { lastCommitAt: '2026-09-25T09:00:00Z', reviewRequests: [], reviews: [], comments: [], checks: [], ...activity },
     ...overrides,

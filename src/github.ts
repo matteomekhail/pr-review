@@ -20,11 +20,18 @@ export interface Actor {
 /** Recent review-loop activity, used to work out whose turn it is. */
 export interface PullActivity {
   lastCommitAt: string | null;
+  /** Users by login; teams by `org/slug`, the handle GitHub mentions them with. */
   reviewRequests: { name: string; isTeam: boolean }[];
   reviews: { state: ReviewState; at: string; author: Actor }[];
   comments: { at: string; author: Actor }[];
   /** Check runs on the head commit that belong to review bots (see review-bots.ts). */
   checks: { name: string; status: string; conclusion: string | null }[];
+}
+
+/** A check run or commit status on the head commit that did not pass; `outcome` is GitHub's word for it, e.g. FAILURE or CANCELLED. */
+export interface FailingCheck {
+  name: string;
+  outcome: string;
 }
 
 export interface PullRequest {
@@ -46,6 +53,7 @@ export interface PullRequest {
   author: { login: string; avatarUrl: string } | null;
   repository: { nameWithOwner: string };
   checkState: CheckState | null;
+  failingChecks: FailingCheck[];
   queueEntry: { position: number; state: string } | null;
   activity: PullActivity;
 }
@@ -62,12 +70,34 @@ interface RawAuthor {
   __typename?: string;
 }
 
-interface RawPullRequest extends Omit<PullRequest, 'checkState' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'activity'> {
+interface RawPullRequest extends Omit<PullRequest, 'checkState' | 'failingChecks' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'activity'> {
   mergeQueueEntry: { position: number; state: string } | null;
-  commits: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: CheckState; contexts?: { nodes: { name?: string; status?: string; conclusion?: string | null }[] } } | null } }[] };
-  reviewRequests?: { nodes: { requestedReviewer: { __typename: string; login?: string; name?: string } | null }[] };
+  commits: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: CheckState; contexts?: { nodes: RawCheckContext[] } } | null } }[] };
+  reviewRequests?: { nodes: { requestedReviewer: { __typename: string; login?: string; name?: string; combinedSlug?: string } | null }[] };
   reviews?: { nodes: { state: ReviewState; submittedAt: string | null; author: RawAuthor | null }[] };
   comments?: { nodes: { createdAt: string; author: RawAuthor | null }[] };
+}
+
+/** A CheckRun (name, status, conclusion) or a StatusContext (context, state). */
+interface RawCheckContext {
+  name?: string;
+  status?: string;
+  conclusion?: string | null;
+  context?: string;
+  state?: string;
+}
+
+const FAILED_OUTCOMES = new Set(['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
+
+function toFailingChecks(contexts: readonly RawCheckContext[]): FailingCheck[] {
+  const seen = new Set<string>();
+  return contexts.flatMap((context) => {
+    const name = context.name ?? context.context;
+    const outcome = context.conclusion ?? context.state;
+    if (name == null || outcome == null || !FAILED_OUTCOMES.has(outcome) || seen.has(name)) return [];
+    seen.add(name);
+    return [{ name, outcome }];
+  });
 }
 
 interface QueuePage {
@@ -87,7 +117,7 @@ function toActivity({ commits, reviewRequests, reviews, comments }: RawPullReque
   return {
     lastCommitAt: commits.nodes[0]?.commit.committedDate ?? null,
     reviewRequests: (reviewRequests?.nodes ?? []).flatMap(({ requestedReviewer: reviewer }) => {
-      const name = reviewer?.login ?? reviewer?.name;
+      const name = reviewer?.login ?? reviewer?.combinedSlug ?? reviewer?.name;
       return name == null ? [] : [{ name, isTeam: reviewer?.__typename === 'Team' }];
     }),
     reviews: (reviews?.nodes ?? []).flatMap((review) => (review.author == null || review.submittedAt == null ? [] : [{ state: review.state, at: review.submittedAt, author: toActor(review.author) }])),
@@ -98,7 +128,8 @@ function toActivity({ commits, reviewRequests, reviews, comments }: RawPullReque
 
 function toPullRequest(raw: RawPullRequest): PullRequest {
   const { commits, mergeQueueEntry, reviewRequests: _requests, reviews: _reviews, comments: _comments, ...pull } = raw;
-  return { ...pull, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: commits.nodes[0]?.commit.statusCheckRollup?.state ?? null, activity: toActivity(raw) };
+  const rollup = commits.nodes[0]?.commit.statusCheckRollup;
+  return { ...pull, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: rollup?.state ?? null, failingChecks: toFailingChecks(rollup?.contexts?.nodes ?? []), activity: toActivity(raw) };
 }
 
 const MERGE_STATE_BATCH = 20;
@@ -147,6 +178,19 @@ let viewerLogin: Promise<string | null> | null = null;
 export function fetchViewerLogin(): Promise<string | null> {
   viewerLogin ??= invoke<string>('viewer').then((login) => (login === '' ? null : login)).catch(() => null);
   return viewerLogin;
+}
+
+let viewerTeams: Promise<Set<string> | null> | null = null;
+
+/** My teams as lower-case `org/slug`; null when GitHub would not say (then the next call asks again). */
+export function fetchViewerTeams(): Promise<Set<string> | null> {
+  viewerTeams ??= invoke<string>('viewer_teams')
+    .then((lines) => new Set(lines.split('\n').map((line) => line.trim().toLowerCase()).filter((line) => line !== '')))
+    .catch(() => {
+      viewerTeams = null;
+      return null;
+    });
+  return viewerTeams;
 }
 
 export function commentOnPull(pull: PullRequest, body: string): Promise<string> {

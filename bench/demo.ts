@@ -2,6 +2,8 @@ import type { FixturePull } from './fixtures';
 
 export const DEMO_NOW = Date.parse('2026-09-28T09:00:00Z');
 export const DEMO_VIEWER = 'jordan-lee';
+/** Teams the demo viewer is in, as `org/slug`. */
+export const DEMO_TEAMS = ['acme/web-platform'];
 
 function hoursAgo(hours: number): string {
   return new Date(DEMO_NOW - hours * 3_600_000).toISOString();
@@ -26,6 +28,12 @@ function demoBotChecks(index: number): { name: string; status: string; conclusio
   if (index % 4 === 1) return [{ name: 'Greptile Review', status: 'IN_PROGRESS', conclusion: null }];
   if (index % 4 === 2) return [{ name: 'claude-review', status: 'IN_PROGRESS', conclusion: null }];
   return [];
+}
+
+function demoFailingChecks(state: string, index: number): { name: string; status: string; conclusion: string | null }[] {
+  if (state !== 'FAILURE') return [];
+  if (index % 2 === 0) return [{ name: 'PR Slack Reactions', status: 'COMPLETED', conclusion: 'CANCELLED' }];
+  return [{ name: 'test (unit)', status: 'COMPLETED', conclusion: 'FAILURE' }, { name: 'lint', status: 'COMPLETED', conclusion: 'FAILURE' }, { name: 'e2e (chromium)', status: 'COMPLETED', conclusion: 'TIMED_OUT' }];
 }
 
 interface DemoSpec {
@@ -80,9 +88,9 @@ export const DEMO_PULLS: FixturePull[] = SPECS.map((spec, index) => {
     mergeQueueEntry: spec.queued == null ? null : { position: spec.queued - 1, state: 'AWAITING_CHECKS' },
     author: { login: 'sam-rivera', avatarUrl: '' },
     repository: { nameWithOwner: spec.repo },
-    commits: { nodes: [{ commit: { committedDate: hoursAgo(commitHoursAgo(index, spec.hoursAgo)), statusCheckRollup: { state: spec.checks, contexts: { nodes: demoBotChecks(index) } } } }] },
-    // Turn demo: every third PR asks the viewer for a review; another third was reviewed by the viewer, half of those updated since.
-    reviewRequests: { nodes: index % 3 === 0 ? [{ requestedReviewer: { __typename: 'User', login: DEMO_VIEWER } }] : [] },
+    commits: { nodes: [{ commit: { committedDate: hoursAgo(commitHoursAgo(index, spec.hoursAgo)), statusCheckRollup: { state: spec.checks, contexts: { nodes: [...demoBotChecks(index), ...demoFailingChecks(spec.checks, index)] } } } }] },
+    // Turn demo: every third PR asks the viewer for a review, by name or through their team; another third was reviewed by the viewer, half of those updated since.
+    reviewRequests: { nodes: index % 6 === 0 ? [{ requestedReviewer: { __typename: 'User', login: DEMO_VIEWER } }] : index % 6 === 3 ? [{ requestedReviewer: { __typename: 'Team', name: 'Web platform', combinedSlug: 'acme/web-platform' } }, { requestedReviewer: { __typename: 'Team', name: 'Design', combinedSlug: 'acme/design' } }] : [] },
     reviews: { nodes: [...(index % 3 === 1 ? [{ state: 'CHANGES_REQUESTED', submittedAt: hoursAgo(spec.hoursAgo + 2), author: { login: DEMO_VIEWER, avatarUrl: '', __typename: 'User' } }] : []), ...demoBotReviews(index, commitHoursAgo(index, spec.hoursAgo))] },
     comments: { nodes: [] },
   };

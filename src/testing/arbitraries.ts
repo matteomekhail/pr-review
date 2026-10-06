@@ -30,6 +30,7 @@ export const pullArbitrary: fc.Arbitrary<PullRequest> = fc.record({
   baseRefName: 'main',
   author: { login: 'author', avatarUrl: '' },
   repository: { nameWithOwner: repo },
+  failingChecks: [],
   activity: { lastCommitAt: null, reviewRequests: [], reviews: [], comments: [], checks: [] },
 }));
 

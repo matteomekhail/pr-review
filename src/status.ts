@@ -21,6 +21,18 @@ export function isFailing(pull: PullRequest): boolean {
   return pull.checkState === 'FAILURE' || pull.checkState === 'ERROR';
 }
 
+const MAX_LISTED_CHECKS = 4;
+/** Real failures first; cancelled runs are usually superseded noise. */
+const OUTCOME_RANK: Record<string, number> = { TIMED_OUT: 1, ACTION_REQUIRED: 1, CANCELLED: 2 };
+
+/** Failing checks by name, worst first, with how they ended unless they simply failed: `lint · e2e (cancelled) · +2 more`. */
+export function describeFailingChecks(pull: PullRequest): string {
+  const ranked = [...pull.failingChecks].sort((left, right) => (OUTCOME_RANK[left.outcome] ?? 0) - (OUTCOME_RANK[right.outcome] ?? 0));
+  const names = ranked.map((check) => (check.outcome === 'FAILURE' ? check.name : `${check.name} (${check.outcome.toLowerCase().replace(/_/g, ' ')})`));
+  const extra = names.length - MAX_LISTED_CHECKS;
+  return [...names.slice(0, MAX_LISTED_CHECKS), ...(extra > 0 ? [`+${extra} more`] : [])].join(' · ');
+}
+
 export function prStatus(pull: PullRequest): { tone: StatusTone; label: string } {
   if (pull.queueEntry != null) return { tone: 'queued', label: 'In merge queue' };
   if (isConflicted(pull)) return { tone: 'blocked', label: 'Conflicts' };

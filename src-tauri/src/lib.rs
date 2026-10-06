@@ -11,8 +11,8 @@ const QUEUE_FIELDS: &str = r#"
   mergeQueueEntry { position state }
   author { login avatarUrl }
   repository { nameWithOwner }
-  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } } } } } } }
-  reviewRequests(first: 5) { nodes { requestedReviewer { __typename ... on User { login avatarUrl } ... on Team { name } } } }
+  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+  reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login avatarUrl } ... on Team { name combinedSlug } } } }
   reviews(last: 20) { nodes { state submittedAt author { login avatarUrl __typename } } }
   comments(last: 20) { nodes { createdAt author { login avatarUrl __typename } } }
 }"#;
@@ -230,6 +230,12 @@ async fn viewer() -> Result<String, String> {
     gh(&["api", "user", "--jq", ".login"]).await.map(|login| login.trim().to_string())
 }
 
+/// Teams I belong to, one `org/slug` per line, to tell team review requests from ones addressed to me.
+#[tauri::command]
+async fn viewer_teams() -> Result<String, String> {
+    gh(&["api", "user/teams", "--paginate", "--jq", ".[] | .organization.login + \"/\" + .slug"]).await
+}
+
 #[tauri::command]
 async fn merge_queue(repo: String, base: String) -> Result<String, String> {
     validate_repo(&repo)?;
@@ -383,7 +389,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, viewer, comment, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }
