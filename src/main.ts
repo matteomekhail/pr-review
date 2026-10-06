@@ -28,6 +28,7 @@ import { computeTurn, type Turn } from './turn';
 import { describeAsk, inAskScope, isStaleRequest, reviewAsk, type AskScope, type ReviewAsk } from './request';
 import { verdictOf, withMyApproval } from './approval';
 import { mergeSearch } from './sync';
+import { PopoverMenu, type MenuSection } from './menu';
 import { authorCounts, MERGED_PERIODS, mergedSince, type MergedPeriod } from './merged';
 import { botReviews, describeBotReview } from './review-bots';
 
@@ -52,7 +53,7 @@ const PREFETCH_AHEAD = 5;
 const DIFF_CACHE_LIMIT = 24;
 /** Every tab syncs this often while the window is visible; a sync that finds nothing new leaves the screen alone. */
 const SYNC_INTERVAL_MS = 60_000;
-const VIEW_TITLES: Record<QueueKind, string> = { turn: 'My turn', review: 'Review requested', involved: 'Involved', mine: 'Created by me', approved: 'Approved by me', merged: 'Merged' };
+const VIEW_TITLES: Record<QueueKind, string> = { turn: 'My turn', review: 'Review', involved: 'Involved', mine: 'Mine', approved: 'Approved', merged: 'Merged' };
 const MERGE_LABELS: Record<MergeMethod, string> = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' };
 
 const element = <T extends HTMLElement>(id: string): T => {
@@ -84,12 +85,10 @@ const dom = {
   confirmText: element('confirm-text'),
   help: element<HTMLDialogElement>('help'),
   shortcutList: element('shortcut-list'),
-  sort: element<HTMLSelectElement>('sort'),
-  smartFilter: element<HTMLSelectElement>('smart-filter'),
-  repoFilter: element<HTMLSelectElement>('repo-filter'),
-  askFilter: element<HTMLSelectElement>('ask-filter'),
-  mergedPeriod: element<HTMLSelectElement>('merged-period'),
-  mergedAuthor: element<HTMLSelectElement>('merged-author'),
+  sliceButton: element<HTMLButtonElement>('slice-button'),
+  sliceLabel: element('slice-button').querySelector<HTMLElement>('.slice-label') as HTMLElement,
+  sliceCount: element('slice-button').querySelector<HTMLElement>('.slice-count') as HTMLElement,
+  sortButton: element<HTMLButtonElement>('sort-button'),
   bulkBar: element('bulk-bar'),
   bulkCount: element('bulk-count'),
   bulkMerge: element<HTMLButtonElement>('bulk-merge'),
@@ -413,64 +412,106 @@ function visiblePulls(): PullRequest[] {
   return visibleCache;
 }
 
-const measureContext = document.createElement('canvas').getContext('2d');
-const SELECT_CHROME_PX = 30;
+const sliceMenu = new PopoverMenu('What to show');
+const sortMenu = new PopoverMenu('Sort');
 
-/** Native selects size to their longest option; size them to the chosen one instead. */
-function fitSelectWidth(select: HTMLSelectElement): void {
-  if (measureContext == null) return;
-  const style = getComputedStyle(select);
-  measureContext.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-  const text = select.selectedOptions[0]?.textContent ?? '';
-  select.style.width = `${Math.ceil(measureContext.measureText(text).width) + SELECT_CHROME_PX}px`;
+const SMART_LABELS: Record<SmartFilter, string> = { all: 'All', ready: 'Ready', attention: 'Unready', waiting: 'Waiting', small: 'Small', recent: 'Recent', tested: 'Tested' };
+const SMART_KEYS: Partial<Record<SmartFilter, string>> = { all: '⌥0', ready: '⌥1', small: '⌥2', recent: '⌥3', attention: '⌥4', tested: '⌥5' };
+const ASK_LABELS: Record<AskScope, string> = { all: 'Me + team', me: 'Only me', team: 'Only team' };
+const SORT_LABELS: Record<SortOrder, string> = { smart: 'Smart', updated: 'Recently updated', size: 'Smallest first' };
+
+function mergedAuthorLabel(author: string): string {
+  return author === '' ? 'Everyone' : author === '@me' ? 'Me' : author;
 }
 
+/** The selector names the filters in effect, or All; on Merged, the period and author. */
+function sliceLabel(): string {
+  if (state.kind === 'merged') return `${MERGED_PERIODS[state.mergedPeriod]} · ${mergedAuthorLabel(state.mergedAuthor)}`;
+  const parts = [state.repoFilter === '' ? '' : (state.repoFilter.split('/')[1] ?? state.repoFilter), hasAskScope(state.kind) && state.askScope !== 'all' ? ASK_LABELS[state.askScope] : '', state.smartFilter === 'all' ? '' : SMART_LABELS[state.smartFilter]];
+  return parts.filter((part) => part !== '').join(' · ') || 'All';
+}
 
-let smartCountsSource: PullRequest[] | null = null;
-let lastStatesVersion = -1;
-let lastRepoFilter: string | null = null;
-let lastAskScope: AskScope | null = null;
+function renderSlice(): void {
+  dom.sliceLabel.textContent = sliceLabel();
+  dom.sliceCount.textContent = String(filteredPulls().length);
+  dom.sortButton.hidden = state.kind === 'merged';
+  sliceMenu.refresh();
+  sortMenu.refresh();
+}
 
-function renderSmartCounts(): void {
-  if (smartCountsSource === state.pulls && lastStatesVersion === listVersion && lastRepoFilter === state.repoFilter && lastAskScope === state.askScope && dom.sort.value === state.sortOrder && dom.smartFilter.value === state.smartFilter) return;
-  smartCountsSource = state.pulls;
-  lastStatesVersion = listVersion;
-  lastRepoFilter = state.repoFilter;
-  lastAskScope = state.askScope;
-  renderRepoOptions();
-  renderAskOptions();
-  renderMergedOptions();
+/** What the selector offers: open work filters by requests (where they apply), state and repository; Merged by period and author. */
+function sliceSections(): MenuSection[] {
+  if (state.kind === 'merged') return [periodSection(), authorSection(), repoSection()];
+  return [...(hasAskScope(state.kind) ? [requestSection()] : []), showSection(), repoSection()];
+}
+
+function requestSection(): MenuSection {
+  const pulls = repoPulls();
+  const team = pulls.filter((pull) => askFor(pull)?.to === 'team').length;
+  const counts: Record<AskScope, number> = { all: pulls.length, me: pulls.length - team, team };
+  const hints: Record<AskScope, string> = { all: '', me: '⌥6', team: '⌥7' };
+  return { title: 'Requests', items: (['all', 'me', 'team'] as const).map((scope) => ({ label: ASK_LABELS[scope], count: String(counts[scope]), hint: hints[scope], checked: state.askScope === scope, run: () => setAskScope(scope, false) })) };
+}
+
+function showSection(): MenuSection {
   const pulls = scopedPulls();
   const now = Date.now();
   const counts: Record<SmartFilter, number> = {
     all: pulls.length,
     ready: pulls.filter(isReady).length,
+    attention: pulls.filter((pull) => isMergeStateSettled(pull) && needsAttention(pull)).length,
+    waiting: pulls.filter((pull) => turnFor(pull)?.whose === 'theirs').length,
     small: pulls.filter(isSmall).length,
     recent: pulls.filter((pull) => isRecent(pull, now)).length,
-    attention: pulls.filter((pull) => isMergeStateSettled(pull) && needsAttention(pull)).length,
     tested: pulls.filter(isTested).length,
-    waiting: pulls.filter((pull) => turnFor(pull)?.whose === 'theirs').length,
   };
-  for (const option of dom.smartFilter.options) option.textContent = `${option.dataset.label ?? option.value} · ${counts[option.value as SmartFilter]}`;
-  dom.smartFilter.value = state.smartFilter;
-  dom.smartFilter.classList.toggle('active', state.smartFilter !== 'all');
-  dom.sort.value = state.sortOrder;
-  fitSelectWidth(dom.smartFilter);
-  fitSelectWidth(dom.sort);
+  return { title: 'Show', items: (Object.keys(SMART_LABELS) as SmartFilter[]).map((filter) => ({ label: SMART_LABELS[filter], count: String(counts[filter]), hint: SMART_KEYS[filter], checked: state.smartFilter === filter, run: () => setSmartFilter(filter, false) })) };
 }
 
-/** Repositories in the current queue, busiest first; the chosen one stays listed even when it has no PRs here. */
-function renderRepoOptions(): void {
+/** Repositories in the current tab, busiest first; the chosen one stays listed even when it has no PRs here. */
+function repoSection(): MenuSection {
   const counts = new Map<string, number>();
   state.pulls.forEach((pull) => counts.set(pull.repository.nameWithOwner, (counts.get(pull.repository.nameWithOwner) ?? 0) + 1));
   if (state.repoFilter !== '' && !counts.has(state.repoFilter)) counts.set(state.repoFilter, 0);
   const repos = [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
   const shortNames = repos.map(([repo]) => repo.split('/')[1] ?? repo);
   const label = (repo: string, index: number): string => (shortNames.filter((name) => name === shortNames[index]).length > 1 ? repo : (shortNames[index] ?? repo));
-  dom.repoFilter.innerHTML = `<option value="">All repos</option>${repos.map(([repo, count], index) => `<option value="${escapeHtml(repo)}" title="${escapeHtml(repo)}">${escapeHtml(label(repo, index))} · ${count}</option>`).join('')}`;
-  dom.repoFilter.value = state.repoFilter;
-  dom.repoFilter.classList.toggle('active', state.repoFilter !== '');
-  fitSelectWidth(dom.repoFilter);
+  return {
+    title: 'Repository',
+    items: [{ label: 'All repos', count: String(state.pulls.length), checked: state.repoFilter === '', run: () => setRepoFilter('') }, ...repos.map(([repo, count], index) => ({ label: label(repo, index), count: String(count), checked: state.repoFilter === repo, run: () => setRepoFilter(repo) }))],
+  };
+}
+
+function periodSection(): MenuSection {
+  return {
+    title: 'Period',
+    items: (Object.keys(MERGED_PERIODS) as MergedPeriod[]).map((period) => {
+      const known = searches.get(`${MERGED_PREFIX}${period}:${state.mergedAuthor}`);
+      return { label: MERGED_PERIODS[period], count: known == null ? undefined : String(known.total), checked: state.mergedPeriod === period, run: () => setMergedFilter(period, state.mergedAuthor) };
+    }),
+  };
+}
+
+/** Everyone, me, then whoever merged in the period, most first (counted from everyone's search once it has run). */
+function authorSection(): MenuSection {
+  const repoMatch = (pull: PullRequest): boolean => state.repoFilter === '' || pull.repository.nameWithOwner === state.repoFilter;
+  const everyone = searches.get(mergedKey(''));
+  const counts = authorCounts((everyone?.pulls ?? state.pulls).filter(repoMatch));
+  const isMe = (login: string): boolean => login.toLowerCase() === viewer?.toLowerCase();
+  const others = counts.filter(([login]) => !isMe(login));
+  if (state.mergedAuthor !== '' && state.mergedAuthor !== '@me' && !others.some(([login]) => login === state.mergedAuthor)) others.unshift([state.mergedAuthor, state.pulls.filter(repoMatch).length]);
+  const known = everyone != null;
+  const item = (author: string, count: number | null) => ({ label: mergedAuthorLabel(author), count: count == null ? undefined : String(count), checked: state.mergedAuthor === author, run: () => setMergedFilter(state.mergedPeriod, author) });
+  return { title: 'Author', items: [item('', known ? counts.reduce((sum, [, count]) => sum + count, 0) : null), item('@me', known ? (counts.find(([login]) => isMe(login))?.[1] ?? 0) : null), ...others.map(([login, count]) => item(login, count))] };
+}
+
+function sortSections(): MenuSection[] {
+  return [{ title: 'Sort', items: (Object.keys(SORT_LABELS) as SortOrder[]).map((order) => ({ label: SORT_LABELS[order], hint: '', checked: state.sortOrder === order, run: () => setSortOrder(order) })) }];
+}
+
+function openSliceMenu(): void {
+  sortMenu.close();
+  sliceMenu.toggle(dom.sliceButton, sliceSections);
 }
 
 /** GitHub returns at most 1,000 results; say so when a merged search was cut short. */
@@ -480,32 +521,6 @@ function mergedNote(): string {
   return `Showing the latest ${entry.pulls.length.toLocaleString()} of ${entry.total.toLocaleString()} · pick a person or a shorter period`;
 }
 
-/** Merged has its own filters (period, author); the open-work ones hide there. */
-function renderMergedOptions(): void {
-  const isMerged = state.kind === 'merged';
-  dom.mergedPeriod.hidden = !isMerged;
-  dom.mergedAuthor.hidden = !isMerged;
-  dom.smartFilter.hidden = isMerged;
-  dom.sort.hidden = isMerged;
-  ['toggle-grouping', 'open-triage'].forEach((id) => (element(id).hidden = isMerged));
-  document.querySelector<HTMLElement>('.filter-bar .chip-sep')?.toggleAttribute('hidden', isMerged);
-  if (!isMerged) return;
-  const repoMatch = (pull: PullRequest): boolean => state.repoFilter === '' || pull.repository.nameWithOwner === state.repoFilter;
-  const everyone = searches.get(mergedKey(''));
-  const counts = authorCounts((everyone?.pulls ?? state.pulls).filter(repoMatch));
-  const mine = counts.find(([login]) => login.toLowerCase() === viewer?.toLowerCase())?.[1] ?? 0;
-  const others = counts.filter(([login]) => login.toLowerCase() !== viewer?.toLowerCase());
-  if (state.mergedAuthor !== '' && state.mergedAuthor !== '@me' && !others.some(([login]) => login === state.mergedAuthor)) others.unshift([state.mergedAuthor, state.pulls.filter(repoMatch).length]);
-  const option = (value: string, label: string, count: number | null): string => `<option value="${escapeHtml(value)}">${escapeHtml(label)}${count == null ? '' : ` · ${count}`}</option>`;
-  const known = everyone != null;
-  dom.mergedAuthor.innerHTML = [option('', 'Everyone', known ? counts.reduce((sum, [, count]) => sum + count, 0) : null), option('@me', 'Me', known ? mine : null), ...others.map(([login, count]) => option(login, login, count))].join('');
-  dom.mergedAuthor.value = state.mergedAuthor;
-  dom.mergedAuthor.classList.toggle('active', state.mergedAuthor !== '');
-  dom.mergedPeriod.value = state.mergedPeriod;
-  fitSelectWidth(dom.mergedAuthor);
-  fitSelectWidth(dom.mergedPeriod);
-}
-
 /** Changing period or author shows its cached list at once, or an empty one while GitHub answers. */
 function setMergedFilter(period: MergedPeriod, author: string): void {
   state.mergedPeriod = period;
@@ -513,28 +528,15 @@ function setMergedFilter(period: MergedPeriod, author: string): void {
   localStorage.setItem('mergedPeriod', period);
   localStorage.setItem('mergedAuthor', author);
   stableOrder.reset();
-  smartCountsSource = null;
   queueCache.set('merged', searchPulls(mergedKey()));
   applyQueue(queueCache.get('merged') ?? []);
   renderCounts();
   void refresh('merged');
 }
 
-function renderAskOptions(): void {
-  dom.askFilter.hidden = !hasAskScope(state.kind);
-  if (dom.askFilter.hidden) return;
-  const pulls = repoPulls();
-  const team = pulls.filter((pull) => askFor(pull)?.to === 'team').length;
-  const counts: Record<AskScope, number> = { all: pulls.length, me: pulls.length - team, team };
-  for (const option of dom.askFilter.options) option.textContent = `${option.dataset.label ?? option.value} · ${counts[option.value as AskScope]}`;
-  dom.askFilter.value = state.askScope;
-  dom.askFilter.classList.toggle('active', state.askScope !== 'all');
-  fitSelectWidth(dom.askFilter);
-}
-
-/** Picking the scope already shown goes back to both, like the smart filters. */
-function setAskScope(scope: AskScope): void {
-  state.askScope = state.askScope === scope && scope !== 'all' ? 'all' : scope;
+/** From a shortcut, picking the scope already shown goes back to both, like the smart filters. */
+function setAskScope(scope: AskScope, isToggle = true): void {
+  state.askScope = isToggle && state.askScope === scope && scope !== 'all' ? 'all' : scope;
   localStorage.setItem('askScope', state.askScope);
   renderList();
   const first = visiblePulls()[0];
@@ -598,13 +600,14 @@ function checksIcon(pull: PullRequest): string {
   }
 }
 
-function readinessDot(pull: PullRequest): string {
+/** Jev's readiness score and its reason, in the open PR's header (rows stay quiet). */
+function readinessChip(pull: PullRequest): string {
   const score = aiScoreFor(pull);
   if (score == null) return '';
   const percent = Math.round(Math.max(0, Math.min(1, score)) * 100);
   const toneName = percent >= 65 ? 'ok' : percent >= 40 ? 'wait' : 'bad';
   const reason = aiResults.get(aiKey(pull))?.reason.trim() ?? '';
-  return `<span class="ai-score ${toneName}" title="${escapeHtml(reason === '' ? `Readiness ${percent}%` : `Readiness ${percent}% · ${reason}`)}">${percent}</span>`;
+  return chip(`<b>${percent}</b>${reason === '' ? '' : `<span class="reason">${escapeHtml(reason)}</span>`}`, reason === '' ? `Readiness ${percent}%` : `Readiness ${percent}% · ${reason}`, `readiness tone-${toneName}`);
 }
 
 function avatar(pull: PullRequest): string {
@@ -743,9 +746,9 @@ function groupHeader(section: ListSection): string {
   </li>`;
 }
 
-const ROW_HEIGHT = 40;
-const GROUP_ROW_HEIGHT = 34;
-const STATUS_ROW_HEIGHT = 34;
+const ROW_HEIGHT = 52;
+const GROUP_ROW_HEIGHT = 30;
+const STATUS_ROW_HEIGHT = 30;
 const virtualList = new VirtualList(dom.list);
 
 /** One fixed column per AI reviewer (Claude, then Greptile) beside the author avatar; empty when it has not touched the PR. */
@@ -789,11 +792,11 @@ function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: str
   const isChecked = state.checkedIds.has(pull.id);
   const exit = leaving.get(pull.id);
   return `<li data-key="${pull.id}" data-id="${pull.id}" class="${pull.id === state.selectedId ? 'selected' : ''}${isChecked ? ' checked' : ''}${pull.queueEntry != null ? ' queued' : ''}${exit != null ? ' leaving' : ''}${exit?.isPending === true ? ' pending' : ''}${failedMerges.has(pull.id) ? ' merge-failed' : ''}"${exit != null ? ` data-leaving="${escapeHtml(exit.label)}"` : ''}>
-        <span class="check-box" data-check="${pull.id}" role="checkbox" aria-checked="${isChecked}" title="Select  E / ⇧V"></span>
-        ${statusIcon(pull)}
-        <span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">${repoTag(pull, primaryRepo)}#${pull.number}${askTag(pull)}</span>
-        <span class="t">${escapeHtml(pull.title)}</span>
-        <span class="right">${pull.queueEntry != null ? `<span class="queue-pill" title="${escapeHtml(queueLabel(pull))}">Queued</span>` : ''}${readinessDot(pull)}${checksIcon(pull)}<span class="delta"><i class="add">+${pull.additions}</i> <i class="del">−${pull.deletions}</i></span>${turnMarker(pull)}${ageLabel(pull)}${botMarks(pull)}${avatar(pull)}</span>
+        <span class="lead">${statusIcon(pull)}<span class="check-box" data-check="${pull.id}" role="checkbox" aria-checked="${isChecked}" title="Select  E / ⇧V"></span></span>
+        <span class="row-main">
+          <span class="row-top"><span class="t">${escapeHtml(pull.title)}</span>${turnMarker(pull)}${ageLabel(pull)}</span>
+          <span class="row-meta">${repoTag(pull, primaryRepo)}<span class="author">${escapeHtml(pull.author?.login ?? 'ghost')}</span><span class="sep">·</span><span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">#${pull.number}</span><span class="sep">·</span><span class="delta">+${pull.additions.toLocaleString('en')} −${pull.deletions.toLocaleString('en')}</span>${pull.queueEntry == null ? '' : `<span class="sep">·</span><span class="queued-note" title="${escapeHtml(queueLabel(pull))}">Queued #${pull.queueEntry.position + 1}</span>`}${checksIcon(pull)}<span class="grow"></span>${askTag(pull)}${botMarks(pull)}</span>
+        </span>
       </li>`;
 }
 
@@ -842,15 +845,8 @@ function renderList(): void {
   virtualList.setRows(rows);
   renderListEmpty(pulls.length, needle);
   virtualList.highlightKey(pulls.some((pull) => pull.id === state.selectedId) ? state.selectedId : null);
-  const groupButton = document.getElementById('toggle-grouping');
-  if (groupButton != null) {
-    groupButton.classList.toggle('active', isGrouped);
-    const label = groupButton.querySelector('.chip-label');
-    if (label != null) label.textContent = isGrouped ? 'Ungroup' : 'Group';
-    groupButton.dataset.tip = `${isGrouped ? 'Ungroup' : 'Group related work'}  ⇧T`;
-  }
   renderCounts();
-  renderSmartCounts();
+  renderSlice();
   renderBulkBar();
   syncDetailVisibility(pulls);
 }
@@ -1017,7 +1013,7 @@ function clampLongComments(list: Element): void {
 
 function listSkeleton(): string {
   const titles = [72, 58, 81, 64, 49, 77, 60, 69, 54, 74, 62, 57, 79, 51];
-  return titles.map((width, index) => `<div class="sk-row" style="--delay:${index * 40}ms"><span class="sk-dot"></span><span class="sk-line sk-id"></span><span class="sk-line" style="width:${width}%"></span><span class="sk-line sk-age"></span></div>`).join('');
+  return titles.map((width, index) => `<div class="sk-row" style="--delay:${index * 40}ms"><span class="sk-dot"></span><span class="sk-lines"><span class="sk-line" style="width:${width}%"></span><span class="sk-line sk-meta" style="width:${Math.round(width * 0.6)}%"></span></span><span class="sk-line sk-age"></span></div>`).join('');
 }
 
 function bootSkeleton(): string {
@@ -1130,6 +1126,7 @@ function renderDetailMeta(pull: PullRequest): void {
     mergedChip(pull),
     askChip(pull),
     turnChip(pull),
+    readinessChip(pull),
     `<span class="status-summary" title="${escapeHtml(summary)}">${statusIcon(pull)}</span>`,
   ].join('');
   const isMerged = pull.mergedAt != null;
@@ -1508,7 +1505,6 @@ async function scoreWithJev(pulls: PullRequest[]): Promise<void> {
       try {
         aiResults.set(key, await assessReadiness(pull));
         invalidateList();
-        smartCountsSource = null;
       } catch (error) {
         console.warn('jev readiness failed', pull.number, errorMessage(error));
       } finally {
@@ -1648,7 +1644,6 @@ function storeSearch(key: string, { pulls: fetched, total }: SearchResult): void
     return;
   }
   searches.set(key, { at: Date.now(), pulls: pulls ?? previous?.pulls ?? [], total });
-  if (key.startsWith(MERGED_PREFIX)) smartCountsSource = null;
   publishQueues(QUEUE_KINDS.filter((queue) => searchesFor(queue).includes(key)));
   persistSearches();
 }
@@ -1909,7 +1904,9 @@ function switchKind(kind: QueueKind): void {
   state.checkedIds.clear();
   state.selectedId = null;
   dom.viewTitle.textContent = VIEW_TITLES[kind];
-  document.querySelectorAll<HTMLButtonElement>('.views button').forEach((button) => button.classList.toggle('active', button.dataset.kind === kind));
+  document.querySelectorAll<HTMLButtonElement>('.rail button').forEach((button) => button.classList.toggle('active', button.dataset.kind === kind));
+  sliceMenu.close();
+  sortMenu.close();
   state.pulls = queueCache.get(kind) ?? [];
   renderList();
   const first = visiblePulls()[0];
@@ -2039,8 +2036,8 @@ function clearChecked(): void {
   setChecked([...state.checkedIds], false);
 }
 
-function setSmartFilter(filter: SmartFilter): void {
-  state.smartFilter = state.smartFilter === filter && filter !== 'all' ? 'all' : filter;
+function setSmartFilter(filter: SmartFilter, isToggle = true): void {
+  state.smartFilter = isToggle && state.smartFilter === filter && filter !== 'all' ? 'all' : filter;
   localStorage.setItem('smartFilter', state.smartFilter);
   renderList();
   const first = visiblePulls()[0];
@@ -2057,7 +2054,7 @@ function cycleSortOrder(): void {
   const orders: SortOrder[] = ['smart', 'updated', 'size'];
   const next = orders[(orders.indexOf(state.sortOrder) + 1) % orders.length] ?? 'smart';
   setSortOrder(next);
-  toast(`Sort: ${dom.sort.selectedOptions[0]?.textContent ?? next}`);
+  toast(`Sort: ${SORT_LABELS[next]}`);
 }
 
 function confirmBulkMerge(pulls: PullRequest[], method: MergeMethod): Promise<boolean> {
@@ -2315,7 +2312,6 @@ const listPane = element('list-pane');
 new ResizeObserver(([entry]) => {
   const width = entry?.contentRect.width ?? 999;
   listPane.classList.toggle('narrow', width < 400);
-  listPane.classList.toggle('compact', width < 580);
 }).observe(listPane);
 const commands = new CommandRegistry();
 const hasPull = (): boolean => selectedPull() != null;
@@ -2590,6 +2586,7 @@ const COMMANDS: Command[] = [
   { id: 'ask-me', section: 'Filter', title: 'Only me: hide PRs here only because my team was asked', aliases: 'direct personal mine review requests scope', keys: ['⌥6'], run: () => setAskScope('me') },
   { id: 'ask-team', section: 'Filter', title: 'Only team: review requests to my teams', aliases: 'team group codeowners engineering scope', keys: ['⌥7'], run: () => setAskScope('team') },
   { id: 'smart-attention', section: 'Filter', title: 'Show PRs that need attention', aliases: 'unapproved conflicts failing blocked red yellow triage', keys: ['⌥4'], run: () => setSmartFilter('attention') },
+  { id: 'filters', section: 'Filter', title: 'What to show: requests, state, repository (period and author on Merged)', aliases: 'filter selector slice scope repo period author', keys: ['⇧f'], run: openSliceMenu },
   { id: 'group', section: 'Filter', title: 'Group related work', aliases: 'cluster effort category batch smart group', keys: ['⇧t'], run: toggleGrouping },
   { id: 'regroup', section: 'Filter', title: 'Regroup', aliases: 'refresh groups cluster', keys: [], run: () => { groupsSignature = ''; localStorage.removeItem(GROUPS_CACHE_KEY); void ensureGroups(true); } },
   { id: 'sort', section: 'Filter', title: 'Cycle sort (smart / updated / smallest)', aliases: 'order', keys: ['⇧s'], run: cycleSortOrder },
@@ -2678,7 +2675,7 @@ function handleSequence(event: KeyboardEvent): boolean {
 }
 
 document.addEventListener('keydown', (event) => {
-  if ((event.isComposing && !event.altKey) || lightbox.isOpen || dom.confirm.open || dom.help.open || dom.bulkConfirm.open || dom.triage.open || themePicker.isOpen || dom.commentDialog.open) return;
+  if ((event.isComposing && !event.altKey) || sliceMenu.isOpen || sortMenu.isOpen || lightbox.isOpen || dom.confirm.open || dom.help.open || dom.bulkConfirm.open || dom.triage.open || themePicker.isOpen || dom.commentDialog.open) return;
   const target = event.target;
   const isTyping = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || (target instanceof HTMLElement && target.isContentEditable);
   if (isTyping && (event.key === 'Escape' || (event.key === 'Enter' && !event.metaKey))) {
@@ -2738,7 +2735,7 @@ document.getElementById('pr-body-split')?.addEventListener('click', (event) => {
   }
 });
 
-document.querySelectorAll<HTMLButtonElement>('.views button').forEach((button) =>
+document.querySelectorAll<HTMLButtonElement>('.rail button').forEach((button) =>
   button.addEventListener('click', () => switchKind(button.dataset.kind as QueueKind)),
 );
 let filterFrame = 0;
@@ -2753,11 +2750,13 @@ dom.filter.addEventListener('input', () => {
 });
 element('toggle-sidebar').addEventListener('click', () => layout.toggle('list'));
 element('toggle-fullscreen').addEventListener('click', () => layout.toggleFocus());
-element('open-help').addEventListener('click', openHelp);
 element('open-github').addEventListener('click', openSelectedOnGitHub);
 element('refresh-button').addEventListener('click', manualRefresh);
-element('open-triage').addEventListener('click', openTriage);
-element('toggle-grouping').addEventListener('click', toggleGrouping);
+dom.sliceButton.addEventListener('click', openSliceMenu);
+dom.sortButton.addEventListener('click', () => {
+  sliceMenu.close();
+  sortMenu.toggle(dom.sortButton, sortSections, 'end');
+});
 element('list-empty').addEventListener('click', (event) => {
   const action = (event.target as HTMLElement).closest<HTMLElement>('[data-empty-action]')?.dataset.emptyAction;
   if (action === 'clear-filter') {
@@ -2786,30 +2785,6 @@ applyTheme();
 enableTooltips();
 routeLinksToBrowser(openInBrowser, (message) => toast(message, true));
 systemDark.addEventListener('change', () => themeId === SYSTEM_THEME_ID && applyTheme());
-dom.repoFilter.addEventListener('change', () => {
-  setRepoFilter(dom.repoFilter.value);
-  dom.repoFilter.blur();
-});
-dom.mergedPeriod.addEventListener('change', () => {
-  setMergedFilter(dom.mergedPeriod.value as MergedPeriod, state.mergedAuthor);
-  dom.mergedPeriod.blur();
-});
-dom.mergedAuthor.addEventListener('change', () => {
-  setMergedFilter(state.mergedPeriod, dom.mergedAuthor.value);
-  dom.mergedAuthor.blur();
-});
-dom.askFilter.addEventListener('change', () => {
-  setAskScope(dom.askFilter.value as AskScope);
-  dom.askFilter.blur();
-});
-dom.smartFilter.addEventListener('change', () => {
-  setSmartFilter(dom.smartFilter.value as SmartFilter);
-  dom.smartFilter.blur();
-});
-dom.sort.addEventListener('change', () => {
-  setSortOrder(dom.sort.value as SortOrder);
-  dom.sort.blur();
-});
 element('bulk-ready').addEventListener('click', selectReady);
 element('bulk-unready').addEventListener('click', selectUnready);
 element('bulk-clear').addEventListener('click', clearChecked);

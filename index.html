@@ -11,58 +11,29 @@
       <section id="list-pane">
         <header class="pane-head drag-region" data-tauri-drag-region>
           <div class="head-title" data-tauri-drag-region>
-            <h2 id="view-title" class="sr-only">Created by me</h2>
-            <nav class="views view-pills h-scroll">
-              <button data-kind="turn" title="Where the next move is yours  ⌘4">My turn <span class="count" data-count="turn"></span></button>
-              <button data-kind="mine" class="active" title="Created by me  ⌘3">Mine <span class="count quiet" data-count="mine"></span></button>
-              <button data-kind="review" title="Review requested  ⌘1">Review <span class="count" data-count="review"></span></button>
-              <button data-kind="involved" title="Involved  ⌘2">Involved <span class="count quiet" data-count="involved"></span></button>
-              <button data-kind="approved" title="Open PRs you approved  ⌘5">Approved <span class="count quiet" data-count="approved"></span></button>
-              <button data-kind="merged" title="Merged pull requests, by period and author  ⌘6">Merged</button>
-            </nav>
-            <button id="refresh-button" class="icon-button refresh-button" title="Refresh  ⌘R"><i data-icon="refresh"></i></button>
+            <h2 id="view-title" data-tauri-drag-region>Mine</h2>
+            <button id="slice-button" class="slice-button" aria-haspopup="menu" aria-expanded="false" title="What to show  ⇧F"><span class="slice-label">All</span><span class="slice-count"></span><i data-icon="chevronDown"></i></button>
+            <span class="head-spacer" data-tauri-drag-region></span>
             <button id="update-pill" class="update-pill" hidden title="Restart to update  ⌘⇧U"><i data-icon="refresh"></i>Update</button>
-            <button id="open-help" class="icon-button" title="Keyboard shortcuts  ?"><i data-icon="keyboard"></i></button>
+            <button id="sort-button" class="icon-button" aria-haspopup="menu" aria-expanded="false" title="Sort  ⇧S"><i data-icon="sort"></i></button>
+            <button id="refresh-button" class="icon-button refresh-button" title="Refresh  ⌘R"><i data-icon="refresh"></i></button>
           </div>
         </header>
-        <div class="filter-bar h-scroll" id="filter-bar">
-          <button id="toggle-grouping" class="chip" title="Group related work  ⇧T"><i data-icon="group"></i><span class="chip-label" data-reserve="Ungroup">Group</span></button>
-          <button id="open-triage" class="chip chip-agent" title="Copy agent prompt for unready PRs  ⇧X"><i data-icon="sparkles"></i>Fix</button>
-          <span class="chip-sep"></span>
-          <select id="repo-filter" class="sort filter-select" title="Filter by repository">
-            <option value="">All repos</option>
-          </select>
-          <select id="merged-period" class="sort filter-select" title="Merged since" hidden>
-            <option value="today">Today</option>
-            <option value="week">This week</option>
-            <option value="7d">Last 7 days</option>
-            <option value="30d">Last 30 days</option>
-            <option value="90d">Last 90 days</option>
-          </select>
-          <select id="merged-author" class="sort filter-select" title="Who opened them" hidden></select>
-          <select id="ask-filter" class="sort filter-select" title="Review requests: mine, my teams' or both  ⌥6 / ⌥7">
-            <option value="all" data-label="Me + team">Me + team</option>
-            <option value="me" data-label="Only me">Only me</option>
-            <option value="team" data-label="Only team">Only team</option>
-          </select>
-          <select id="smart-filter" class="sort filter-select" title="Filter  ⌥0–⌥5">
-            <option value="all" data-label="All">All</option>
-            <option value="ready" data-label="Ready">Ready</option>
-            <option value="attention" data-label="Unready">Unready</option>
-            <option value="waiting" data-label="Waiting">Waiting</option>
-            <option value="small" data-label="Small">Small</option>
-            <option value="recent" data-label="Recent">Recent</option>
-            <option value="tested" data-label="Tested">Tested</option>
-          </select>
-          <select id="sort" class="sort" title="Sort order  ⇧S">
-            <option value="smart">Smart</option>
-            <option value="updated">Updated</option>
-            <option value="size">Smallest</option>
-          </select>
+        <div class="list-body">
+          <nav class="rail" aria-label="Views">
+            <button data-kind="turn" title="My turn: where the next move is yours  ⌘4"><i data-icon="circleDot"></i><span class="count" data-count="turn"></span></button>
+            <button data-kind="review" title="Review requested  ⌘1"><i data-icon="eye"></i><span class="count" data-count="review"></span></button>
+            <button data-kind="mine" class="active" title="Created by me  ⌘3"><i data-icon="user"></i><span class="count" data-count="mine"></span></button>
+            <button data-kind="involved" title="Involved  ⌘2"><i data-icon="users"></i><span class="count" data-count="involved"></span></button>
+            <button data-kind="approved" title="Approved by me  ⌘5"><i data-icon="circleCheck"></i><span class="count" data-count="approved"></span></button>
+            <button data-kind="merged" title="Merged, by period and author  ⌘6"><i data-icon="merge"></i><span class="count"></span></button>
+          </nav>
+          <div class="list-column">
+            <ol id="pr-list"></ol>
+            <div id="list-empty" class="list-empty" hidden></div>
+            <div id="list-skeleton" class="list-skeleton" aria-hidden="true"></div>
+          </div>
         </div>
-        <ol id="pr-list"></ol>
-        <div id="list-empty" class="list-empty" hidden></div>
-        <div id="list-skeleton" class="list-skeleton" aria-hidden="true"></div>
         <div id="bulk-bar" hidden>
           <span id="bulk-count"></span>
           <button id="bulk-ready" class="ghost" title="Select every Ready PR  ⇧R">Ready <kbd>⇧</kbd><kbd>R</kbd></button>
