@@ -348,7 +348,8 @@ img { -webkit-user-drag: none; }
 /* Six tabs need the room: under 580px the shortcuts button gives way (? still opens it) and only the to-do
    tabs (My turn, Review) and the open one keep their counts. */
 #list-pane.compact #open-help { display: none; }
-#list-pane.compact .view-pills button { padding: 0 3px; gap: 3px; }
+#list-pane.compact .view-pills { gap: 0; }
+#list-pane.compact .view-pills button { padding: 0 3px; gap: 2px; }
 #list-pane.compact .view-pills button:not(.active) .count.quiet { display: none; }
 
 .split-button select[hidden] { display: none; }
