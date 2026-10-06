@@ -29,7 +29,11 @@ function queueFor(kind: string): FixturePull[] {
 const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   queue: (args) => JSON.stringify([{ data: { search: { nodes: queueFor(args.kind as string) } } }]),
   merge_states: (args) => JSON.stringify({ data: { nodes: (args.ids as string[]).map((id) => byId.get(id)).filter((pull) => pull != null).map((pull) => mergeStateOf(pull as FixturePull)) } }),
-  body: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; return IS_DEMO ? demoBody(pull) : generateBody(pull); },
+  body: (args) => {
+    if (new URLSearchParams(location.search).has('failBodyOnce') && calls.body === 1) throw new Error('connection reset by peer');
+    const pull = byNumber.get(args.number as number) ?? pulls[0]!;
+    return IS_DEMO ? demoBody(pull) : generateBody(pull);
+  },
   diff: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; return (IS_DEMO ? demoDiff(pull) : null) ?? generateDiff(pull); },
   conversation: (args) => IS_DEMO ? JSON.stringify(demoConversation(byNumber.get(args.number as number) ?? pulls[0]!)) : JSON.stringify({ data: { repository: { pullRequest: { comments: { totalCount: 2, nodes: [
     { id: 'c1', bodyHTML: `<p>Long review note.</p>${'<p>Line of detail that goes on for a while to make this comment tall.</p>'.repeat(30)}`, createdAt: '2026-09-26T10:00:00Z', url: 'https://github.com/o/web/pull/1#c1', author: { login: 'reviewer', avatarUrl: '', __typename: 'User' } },

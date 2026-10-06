@@ -1205,6 +1205,7 @@ function renderDetail(pull: PullRequest): void {
       if (token !== renderToken) return;
       const list = description.querySelector('.conversation-list');
       if (list != null) list.innerHTML = `<p class="error">Could not load comments: ${escapeHtml(errorMessage(error))}</p>`;
+      retryDetail(pull);
     },
   );
   void loadBody(pull, true).then(
@@ -1220,8 +1221,23 @@ function renderDetail(pull: PullRequest): void {
       if (token !== renderToken) return;
       const target = description.querySelector('.markdown');
       if (target != null) target.innerHTML = `<p class="error">Could not load description: ${escapeHtml(errorMessage(error))}</p>`;
+      retryDetail(pull);
     },
   );
+}
+
+/** A detail fetch that failed (often a network blip) is tried again shortly, once a minute at most, if the PR is still open. */
+const DETAIL_RETRY_MS = 3_000;
+const detailRetries = new Map<string, number>();
+
+function retryDetail(pull: PullRequest): void {
+  if (Date.now() - (detailRetries.get(pull.id) ?? 0) < 60_000) return;
+  detailRetries.set(pull.id, Date.now());
+  const token = renderToken;
+  window.setTimeout(() => {
+    const current = selectedPull();
+    if (token === renderToken && current?.id === pull.id) void renderSelection(current);
+  }, DETAIL_RETRY_MS);
 }
 
 function fileLabel(file: ParsedFile): string {
@@ -1338,6 +1354,7 @@ async function renderSelection(pull: PullRequest): Promise<void> {
   } catch (error) {
     if (token !== renderToken) return;
     dom.files.innerHTML = `<div class="error pad">${escapeHtml(errorMessage(error))}</div>`;
+    retryDetail(pull);
   } finally {
     window.clearTimeout(skeletonTimer);
     if (token === renderToken) showDiffLoading(false);
@@ -1774,6 +1791,17 @@ const MIN_REFRESH_GAP_MS = 20_000;
 const loudRefreshes = new Set<QueueKind>();
 /** Tabs whose last background sync failed, so a failure is reported once rather than every minute. */
 const failingSyncs = new Set<QueueKind>();
+/** A failed sync tries again soon, then less often, rather than waiting for the next minute (or for focus). */
+const RETRY_SYNC_MS = [5_000, 30_000];
+const retryTimers = new Map<QueueKind, number>();
+
+function retrySync(kind: QueueKind, isRepeat: boolean): void {
+  if (retryTimers.has(kind)) return;
+  retryTimers.set(kind, window.setTimeout(() => {
+    retryTimers.delete(kind);
+    void refresh(kind, true);
+  }, RETRY_SYNC_MS[isRepeat ? 1 : 0]));
+}
 
 let refreshTicker: number | undefined;
 
@@ -1843,6 +1871,7 @@ function refresh(kind: QueueKind, isForced = false, maxAgeMs = isForced ? FRESH_
     .catch((error: unknown) => {
       const isRepeat = failingSyncs.has(kind) && !loudRefreshes.has(kind);
       failingSyncs.add(kind);
+      retrySync(kind, isRepeat);
       if (kind !== state.kind) return;
       if (isRepeat) console.warn('sync failed again', kind, errorMessage(error));
       else toast(`GitHub: ${errorMessage(error).split('\n')[0]}`, true);
