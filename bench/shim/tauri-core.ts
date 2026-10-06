@@ -9,7 +9,7 @@ const byId = new Map(pulls.map((pull) => [pull.id, pull]));
 const byNumber = new Map(pulls.map((pull) => [pull.number, pull]));
 const calls: Record<string, number> = {};
 
-Object.assign(window, { __shimCalls: calls });
+Object.assign(window, { __shimCalls: calls, __shimPulls: pulls });
 
 function mergeStateOf(pull: FixturePull): { id: string; mergeable: string; mergeStateStatus: string } {
   const conflicted = IS_DEMO ? DEMO_CONFLICTS.has(pull.id) : pull.number % 13 === 0;

@@ -7,7 +7,7 @@ const QUEUE_FIELDS: &str = r#"
 ... on PullRequest {
   id number title url isDraft
   createdAt updatedAt additions deletions changedFiles
-  headRefName baseRefName reviewDecision
+  headRefName headRefOid baseRefName reviewDecision
   mergeQueueEntry { position state }
   author { login avatarUrl }
   repository { nameWithOwner }

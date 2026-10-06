@@ -29,6 +29,7 @@ function pull(author: string, activity: Partial<PullActivity>, overrides: Partia
     deletions: 2,
     changedFiles: 1,
     headRefName: 'h',
+    headRefOid: 'abc',
     baseRefName: 'main',
     mergeable: 'MERGEABLE',
     mergeStateStatus: 'CLEAN',

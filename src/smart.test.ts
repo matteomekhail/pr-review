@@ -17,6 +17,7 @@ function pull(overrides: Partial<PullRequest>): PullRequest {
     deletions: 2,
     changedFiles: 1,
     headRefName: 'h',
+    headRefOid: 'abc',
     baseRefName: 'main',
     mergeable: 'MERGEABLE',
     mergeStateStatus: 'CLEAN',

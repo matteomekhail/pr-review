@@ -47,6 +47,8 @@ export interface PullRequest {
   deletions: number;
   changedFiles: number;
   headRefName: string;
+  /** The head commit; it changes only when the code does, unlike `updatedAt`. */
+  headRefOid: string;
   baseRefName: string;
   mergeable: MergeableState;
   mergeStateStatus: string;

@@ -82,6 +82,7 @@ export const DEMO_PULLS: FixturePull[] = SPECS.map((spec, index) => {
     additions: spec.additions,
     deletions: spec.deletions,
     changedFiles: spec.files,
+    headRefOid: `sha-${number}`,
     headRefName: spec.title.replace(/^[a-z]+(\([^)]*\))?:\s*/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 42).replace(/-$/, ''),
     baseRefName: 'main',
     reviewDecision: spec.review,

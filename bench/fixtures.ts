@@ -10,6 +10,7 @@ export interface FixturePull {
   deletions: number;
   changedFiles: number;
   headRefName: string;
+  headRefOid: string;
   baseRefName: string;
   reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
   mergeQueueEntry: { position: number; state: string } | null;
@@ -54,6 +55,7 @@ export function generatePulls(count: number, seed = 42): FixturePull[] {
       deletions: Math.floor(random() ** 3 * 800),
       changedFiles: 1 + Math.floor(random() * 30),
       headRefName: `branch-${number}`,
+      headRefOid: `sha-${number}`,
       baseRefName: 'main',
       reviewDecision: pick(['APPROVED', 'APPROVED', 'REVIEW_REQUIRED', 'CHANGES_REQUESTED', null] as const),
       mergeQueueEntry: random() < 0.08 ? { position: Math.floor(random() * 6), state: 'QUEUED' } : null,

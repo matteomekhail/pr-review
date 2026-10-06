@@ -27,6 +27,7 @@ import { assessReadiness, isReadinessAvailable, type ReadinessResult } from './r
 import { computeTurn, type Turn } from './turn';
 import { describeAsk, inAskScope, isStaleRequest, reviewAsk, type AskScope, type ReviewAsk } from './request';
 import { verdictOf, withMyApproval } from './approval';
+import { mergeSearch } from './sync';
 import { botReviews, describeBotReview } from './review-bots';
 
 interface State {
@@ -45,7 +46,8 @@ interface State {
 
 const PREFETCH_AHEAD = 5;
 const DIFF_CACHE_LIMIT = 24;
-const QUEUE_REFRESH_MS = 120_000;
+/** Every tab syncs this often while the window is visible; a sync that finds nothing new leaves the screen alone. */
+const SYNC_INTERVAL_MS = 60_000;
 const VIEW_TITLES: Record<QueueKind, string> = { turn: 'My turn', review: 'Review requested', involved: 'Involved', mine: 'Created by me', approved: 'Approved by me' };
 const MERGE_LABELS: Record<MergeMethod, string> = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' };
 
@@ -177,14 +179,19 @@ function relativeTime(iso: string): string {
   return days < 30 ? `${days}d` : `${Math.round(days / 30)}mo`;
 }
 
+/** A diff only changes with the code, so comments and reviews do not refetch it. */
 function diffKey(pull: PullRequest): string {
+  return `${pull.id}:${pull.headRefOid}`;
+}
+
+function bodyKey(pull: PullRequest): string {
   return `${pull.id}:${pull.updatedAt}`;
 }
 
 const bodyCache = new Map<string, Promise<string>>();
 
 function loadBody(pull: PullRequest, isPriority = false): Promise<string> {
-  const key = diffKey(pull);
+  const key = bodyKey(pull);
   const cached = bodyCache.get(key);
   if (cached != null) {
     void cached.then((html) => preloadImages(imageUrlsInHtml(html), isPriority), () => undefined);
@@ -1070,6 +1077,26 @@ function syncQueueState(pull: PullRequest): void {
   });
 }
 
+/** The conversation on screen, so the bot toggle and background updates re-render what is current. */
+let shownConversation: ConversationItem[] = [];
+
+/** The open PR changed without new code: its header and conversation update in place, and the diff keeps its scroll. */
+function refreshOpenPull(pull: PullRequest, previous: PullRequest): void {
+  renderDetailMeta(pull);
+  if (pull.updatedAt === previous.updatedAt) return;
+  const section = document.querySelector('.description [data-conversation]');
+  if (section == null) return;
+  const token = renderToken;
+  void loadConversation(pull).then(
+    (items) => {
+      if (token !== renderToken || !section.isConnected) return;
+      shownConversation = items;
+      renderConversation(section, items);
+    },
+    () => undefined,
+  );
+}
+
 function renderDetail(pull: PullRequest): void {
   syncQueueState(pull);
   void syncPreviewButton(pull);
@@ -1089,12 +1116,13 @@ function renderDetail(pull: PullRequest): void {
       if (token !== renderToken) return;
       const section = description.querySelector('[data-conversation]');
       if (section == null) return;
+      shownConversation = items;
       renderConversation(section, items);
       section.addEventListener('click', (event) => {
         if ((event.target as HTMLElement).closest('[data-toggle-bots]') == null) return;
         showBotComments = !showBotComments;
         localStorage.setItem('showBotComments', showBotComments ? '1' : '0');
-        renderConversation(section, items);
+        renderConversation(section, shownConversation);
       });
     },
     (error: unknown) => {
@@ -1335,7 +1363,12 @@ function toggleCurrentFile(): void {
   if (file != null) diffView.toggle(file.id);
 }
 
-const mergeStateCache = new Map<string, { updatedAt: string; state: MergeState }>();
+/** Merge state, kept while the PR, its code and its checks stay as they were. */
+const mergeStateCache = new Map<string, { key: string; state: MergeState }>();
+
+function mergeKey(pull: PullRequest): string {
+  return `${pull.updatedAt}|${pull.headRefOid}|${pull.checkState ?? ''}`;
+}
 
 const AI_CONCURRENCY = 4;
 const AI_CACHE_KEY = 'jevReadiness.v2';
@@ -1398,17 +1431,17 @@ let mergeStateRenderFrame = 0;
 
 function withMergeState(pull: PullRequest): PullRequest {
   const cached = mergeStateCache.get(pull.id);
-  return cached?.updatedAt === pull.updatedAt ? { ...pull, mergeable: cached.state.mergeable, mergeStateStatus: cached.state.mergeStateStatus } : pull;
+  return cached?.key === mergeKey(pull) ? { ...pull, mergeable: cached.state.mergeable, mergeStateStatus: cached.state.mergeStateStatus } : pull;
 }
 
 /** Merge states land in every tab holding the PR, since tabs share searches. */
 function applyMergeStates(states: MergeState[]): void {
   invalidateList();
   const byId = new Map(states.map((mergeState) => [mergeState.id, mergeState]));
-  const updatedAtById = new Map([...queueCache.values()].flat().map((pull) => [pull.id, pull.updatedAt]));
+  const keyById = new Map([...queueCache.values()].flat().map((pull) => [pull.id, mergeKey(pull)]));
   for (const mergeState of states) {
-    const updatedAt = updatedAtById.get(mergeState.id);
-    if (updatedAt != null && mergeState.mergeStateStatus !== 'UNKNOWN') mergeStateCache.set(mergeState.id, { updatedAt, state: mergeState });
+    const key = keyById.get(mergeState.id);
+    if (key != null && mergeState.mergeStateStatus !== 'UNKNOWN') mergeStateCache.set(mergeState.id, { key, state: mergeState });
   }
   for (const [kind, pulls] of queueCache) {
     if (!pulls.some((pull) => byId.has(pull.id))) continue;
@@ -1437,7 +1470,7 @@ const MERGE_STATE_RETRY_MS = [2_000, 5_000, 10_000, 20_000];
 const mergeStatesInFlight = new Set<string>();
 
 async function loadMergeStates(pulls: PullRequest[]): Promise<void> {
-  const ids = [...new Set(pulls.filter((pull) => mergeStateCache.get(pull.id)?.updatedAt !== pull.updatedAt && !mergeStatesInFlight.has(pull.id)).map((pull) => pull.id))];
+  const ids = [...new Set(pulls.filter((pull) => mergeStateCache.get(pull.id)?.key !== mergeKey(pull) && !mergeStatesInFlight.has(pull.id)).map((pull) => pull.id))];
   ids.forEach((id) => mergeStatesInFlight.add(id));
   try {
     let pending = ids;
@@ -1462,7 +1495,7 @@ const QUEUE_SEARCHES: Record<QueueKind, readonly SearchKind[]> = { turn: ['revie
 const QUEUE_KINDS = Object.keys(QUEUE_SEARCHES) as QueueKind[];
 const SEARCH_KINDS: readonly SearchKind[] = ['review', 'mine', 'involved', 'reviewed'];
 /** Searches outlive restarts, so the app opens on the last data it saw while it refreshes. */
-const SEARCH_CACHE_KEY = 'searchCache.v1';
+const SEARCH_CACHE_KEY = 'searchCache.v2';
 /** A forced refresh still reuses a search that finished this recently, e.g. for another tab. */
 const FRESH_SEARCH_MS = 3_000;
 /** GitHub's search index trails reviews by minutes; a PR I reviewed here stays in my reviewed search meanwhile. */
@@ -1486,11 +1519,18 @@ function loadSearch(kind: SearchKind, maxAgeMs: number): Promise<void> {
   return pending;
 }
 
-function storeSearch(kind: SearchKind, pulls: PullRequest[]): void {
-  const found = new Set(pulls.map((pull) => pull.id));
-  const lagging = kind === 'reviewed' ? searchPulls(kind).filter((pull) => !found.has(pull.id) && Date.now() - (reviewedHere.get(pull.id) ?? 0) < SEARCH_LAG_MS) : [];
-  searches.set(kind, { at: Date.now(), pulls: [...lagging, ...pulls] });
+/** Keeps a search's results; when nothing changed it only notes the time, so the screen stays as it is. */
+function storeSearch(kind: SearchKind, fetched: PullRequest[]): void {
   if (kind === 'review' && viewerTeams == null) loadViewerTeams();
+  const found = new Set(fetched.map((pull) => pull.id));
+  const lagging = kind === 'reviewed' ? searchPulls(kind).filter((pull) => !found.has(pull.id) && Date.now() - (reviewedHere.get(pull.id) ?? 0) < SEARCH_LAG_MS) : [];
+  const previous = searches.get(kind);
+  const pulls = mergeSearch(previous?.pulls ?? [], [...lagging, ...fetched]);
+  if (pulls == null && previous != null) {
+    previous.at = Date.now();
+    return;
+  }
+  searches.set(kind, { at: Date.now(), pulls: pulls ?? [] });
   publishQueues(QUEUE_KINDS.filter((queue) => QUEUE_SEARCHES[queue].includes(kind)));
   persistSearches();
 }
@@ -1558,11 +1598,12 @@ interface SearchCache {
   viewer: string | null;
   teams: string[] | null;
   searches: Partial<Record<SearchKind, { at: number; pulls: PullRequest[] }>>;
-  mergeStates: Record<string, { updatedAt: string; state: MergeState }>;
+  mergeStates: Record<string, { key: string; state: MergeState }>;
 }
 
 /** Shows the last data seen, then refreshes; a cache from another account or an older shape is dropped. */
 function hydrateSearches(): void {
+  localStorage.removeItem('searchCache.v1');
   try {
     const cached = JSON.parse(localStorage.getItem(SEARCH_CACHE_KEY) ?? 'null') as SearchCache | null;
     if (cached == null) return;
@@ -1615,12 +1656,16 @@ function followUp(ids: readonly string[]): void {
 
 const inFlight = new Map<QueueKind, Promise<void>>();
 const MIN_REFRESH_GAP_MS = 20_000;
+/** Refreshes the user asked for. Background syncs show no spinner unless a tab has nothing to show yet. */
+const loudRefreshes = new Set<QueueKind>();
+/** Tabs whose last background sync failed, so a failure is reported once rather than every minute. */
+const failingSyncs = new Set<QueueKind>();
 
 let refreshTicker: number | undefined;
 
 function renderRefreshStatus(): void {
   const button = document.getElementById('refresh-button');
-  const isLoading = inFlight.has(state.kind);
+  const isLoading = loudRefreshes.has(state.kind) || (inFlight.has(state.kind) && fetchedAt(state.kind) == null);
   button?.classList.toggle('spinning', isLoading);
   document.getElementById('list-pane')?.classList.toggle('loading', isLoading);
   if (button == null) return;
@@ -1649,32 +1694,42 @@ function manualRefresh(): void {
   const before = queueCache.get(state.kind) ?? [];
   const kind = state.kind;
   const started = Date.now();
-  if (inFlight.has(kind)) {
+  if (loudRefreshes.has(kind)) {
     toast('Already refreshing…');
     return;
   }
-  const pending = refresh(kind, true);
+  loudRefreshes.add(kind);
+  const pending = inFlight.get(kind) ?? refresh(kind, true, 0);
   renderRefreshStatus();
-  void pending.then(() => {
-    if (kind !== state.kind || (fetchedAt(kind) ?? 0) < started) return;
-    toast(summarizeChange(before, queueCache.get(kind) ?? []));
-  });
+  void pending
+    .then(() => {
+      if (kind !== state.kind || (fetchedAt(kind) ?? 0) < started) return;
+      toast(summarizeChange(before, queueCache.get(kind) ?? []));
+    })
+    .finally(() => {
+      loudRefreshes.delete(kind);
+      renderRefreshStatus();
+    });
 }
 
-function refresh(kind: QueueKind, isForced = false): Promise<void> {
+/** `maxAgeMs` is how old a shared search may be and still count; a forced refresh reuses only ones a few seconds old. */
+function refresh(kind: QueueKind, isForced = false, maxAgeMs = isForced ? FRESH_SEARCH_MS : MIN_REFRESH_GAP_MS): Promise<void> {
   const running = inFlight.get(kind);
   if (running != null) return running;
   if (!isForced && Date.now() - (fetchedAt(kind) ?? 0) < MIN_REFRESH_GAP_MS) return Promise.resolve();
-  const maxAge = isForced ? FRESH_SEARCH_MS : MIN_REFRESH_GAP_MS;
-  const pending = Promise.all(QUEUE_SEARCHES[kind].map((search) => loadSearch(search, maxAge)))
+  const pending = Promise.all(QUEUE_SEARCHES[kind].map((search) => loadSearch(search, maxAgeMs)))
     .then(() => {
+      failingSyncs.delete(kind);
       if (kind !== state.kind) return;
       void scoreWithJev(state.pulls);
       void ensureGroups();
     })
     .catch((error: unknown) => {
+      const isRepeat = failingSyncs.has(kind) && !loudRefreshes.has(kind);
+      failingSyncs.add(kind);
       if (kind !== state.kind) return;
-      toast(`GitHub: ${errorMessage(error).split('\n')[0]}`, true);
+      if (isRepeat) console.warn('sync failed again', kind, errorMessage(error));
+      else toast(`GitHub: ${errorMessage(error).split('\n')[0]}`, true);
       if (state.pulls.length === 0) {
         clearBootSkeletons();
         dom.empty.textContent = `Could not load: ${errorMessage(error)}`;
@@ -1695,7 +1750,9 @@ function applyQueue(pulls: PullRequest[]): void {
   renderList();
   const stillThere = previous == null ? undefined : state.pulls.find((pull) => pull.id === previous.id);
   if (stillThere != null) {
-    if (stillThere.updatedAt !== previous?.updatedAt) void select(stillThere);
+    if (previous == null || stillThere === previous) return;
+    if (stillThere.headRefOid !== previous.headRefOid) void select(stillThere);
+    else refreshOpenPull(stillThere, previous);
     return;
   }
   const first = visiblePulls()[0];
@@ -2607,10 +2664,17 @@ dom.bulkMerge.addEventListener('click', () => void bulkMerge());
 syncPaneButtons();
 dom.approve.addEventListener('click', () => void approveSelected());
 dom.merge.addEventListener('click', () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()));
-window.addEventListener('focus', () => void refresh(state.kind));
+/** Syncs every tab; searches they share are fetched once, and ones fetched in the last 20s are reused. */
+function syncAll(): void {
+  QUEUE_KINDS.forEach((kind) => void refresh(kind));
+}
+window.addEventListener('focus', syncAll);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') syncAll();
+});
 window.setInterval(() => {
-  if (document.visibilityState === 'visible') void refresh(state.kind);
-}, QUEUE_REFRESH_MS);
+  if (document.visibilityState === 'visible') syncAll();
+}, SYNC_INTERVAL_MS);
 
 loadViewerTeams();
 

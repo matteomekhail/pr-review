@@ -19,6 +19,7 @@ function pull(author: string, reviewRequests: PullActivity['reviewRequests']): P
     deletions: 2,
     changedFiles: 1,
     headRefName: 'h',
+    headRefOid: 'abc',
     baseRefName: 'main',
     mergeable: 'MERGEABLE',
     mergeStateStatus: 'CLEAN',
