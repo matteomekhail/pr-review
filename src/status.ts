@@ -1,4 +1,4 @@
-import type { PullRequest } from './github';
+import type { PullRequest, ReviewState } from './github';
 
 export type StatusTone = 'queued' | 'blocked' | 'draft' | 'approved' | 'pending';
 export type AttentionReason = 'conflicts' | 'failing checks' | 'changes requested' | 'blocked' | 'not approved';
@@ -25,20 +25,63 @@ const MAX_LISTED_CHECKS = 4;
 /** Real failures first; cancelled runs are usually superseded noise. */
 const OUTCOME_RANK: Record<string, number> = { TIMED_OUT: 1, ACTION_REQUIRED: 1, CANCELLED: 2 };
 
-/** Failing checks by name, worst first, with how they ended unless they simply failed: `lint · e2e (cancelled) · +2 more`. */
+/** Failing checks by name, worst first, with how they ended unless they simply failed: `lint, e2e (cancelled), +2 more`. */
 export function describeFailingChecks(pull: PullRequest): string {
   const ranked = [...pull.failingChecks].sort((left, right) => (OUTCOME_RANK[left.outcome] ?? 0) - (OUTCOME_RANK[right.outcome] ?? 0));
   const names = ranked.map((check) => (check.outcome === 'FAILURE' ? check.name : `${check.name} (${check.outcome.toLowerCase().replace(/_/g, ' ')})`));
   const extra = names.length - MAX_LISTED_CHECKS;
-  return [...names.slice(0, MAX_LISTED_CHECKS), ...(extra > 0 ? [`+${extra} more`] : [])].join(' · ');
+  return [...names.slice(0, MAX_LISTED_CHECKS), ...(extra > 0 ? [`+${extra} more`] : [])].join(', ');
 }
 
-export function prStatus(pull: PullRequest): { tone: StatusTone; label: string } {
+/** A reason a pull request is red. */
+export type Blocker = Exclude<AttentionReason, 'not approved'>;
+
+/** The order a red status icon picks its glyph from: what most needs a human first. */
+const BLOCKER_ORDER: readonly Blocker[] = ['conflicts', 'changes requested', 'failing checks', 'blocked'];
+const BLOCKER_LABELS: Record<Blocker, string> = { conflicts: 'Conflicts', 'changes requested': 'Changes requested', 'failing checks': 'Checks failing', blocked: 'Blocked' };
+const REVIEW_VERDICTS = new Set<ReviewState>(['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED']);
+
+export function blockers(pull: PullRequest): Blocker[] {
+  const reasons = attentionReasons(pull);
+  return BLOCKER_ORDER.filter((reason) => reasons.includes(reason));
+}
+
+/** Reviewers whose latest verdict asks for changes; a later comment does not withdraw it. */
+export function changeRequesters(pull: PullRequest): string[] {
+  const verdicts = new Map<string, { state: ReviewState; at: string }>();
+  for (const review of pull.activity.reviews) {
+    const previous = verdicts.get(review.author.login);
+    if (REVIEW_VERDICTS.has(review.state) && (previous == null || review.at >= previous.at)) verdicts.set(review.author.login, review);
+  }
+  return [...verdicts].filter(([, verdict]) => verdict.state === 'CHANGES_REQUESTED').map(([login]) => login);
+}
+
+/** One phrase per reason the pull request is red, the icon's own first. */
+export function describeBlockers(pull: PullRequest): string[] {
+  return blockers(pull).map((blocker) => {
+    switch (blocker) {
+      case 'conflicts':
+        return 'Merge conflicts';
+      case 'changes requested': {
+        const names = changeRequesters(pull);
+        return names.length === 0 ? 'Changes requested' : `Changes requested by ${names.map((name) => `@${name}`).join(', ')}`;
+      }
+      case 'failing checks': {
+        const failing = describeFailingChecks(pull);
+        return failing === '' ? 'Checks failing' : `Checks failing: ${failing}`;
+      }
+      case 'blocked':
+        return 'Approved, but blocked by branch rules';
+      default:
+        return blocker satisfies never;
+    }
+  });
+}
+
+export function prStatus(pull: PullRequest): { tone: StatusTone; label: string; blocker?: Blocker } {
   if (pull.queueEntry != null) return { tone: 'queued', label: 'In merge queue' };
-  if (isConflicted(pull)) return { tone: 'blocked', label: 'Conflicts' };
-  if (pull.reviewDecision === 'CHANGES_REQUESTED') return { tone: 'blocked', label: 'Changes requested' };
-  if (isFailing(pull)) return { tone: 'blocked', label: 'Checks failing' };
-  if (pull.reviewDecision === 'APPROVED' && pull.mergeStateStatus === 'BLOCKED') return { tone: 'blocked', label: 'Blocked' };
+  const [blocker] = blockers(pull);
+  if (blocker != null) return { tone: 'blocked', label: BLOCKER_LABELS[blocker], blocker };
   if (pull.isDraft) return { tone: 'draft', label: 'Draft' };
   if (pull.reviewDecision === 'APPROVED') return { tone: 'approved', label: 'Approved' };
   return { tone: 'pending', label: 'Not approved' };

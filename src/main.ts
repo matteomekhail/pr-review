@@ -4,7 +4,7 @@ import { startAutoUpdate } from './updater';
 import { StableOrder } from './stable-order';
 import { watchKbdGlyphs } from './kbd-glyphs';
 import { animateDialogCancel, flash, glideScrollBy, glideScrollTo, setVisibleWithMotion } from './motion';
-import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, describeFailingChecks, isFailing, needsAttention, prStatus, type AttentionReason } from './status';
+import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, describeBlockers, describeFailingChecks, isFailing, needsAttention, prStatus, type AttentionReason, type Blocker } from './status';
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
@@ -479,11 +479,13 @@ function queueLabel(pull: PullRequest): string {
   return `In merge queue · #${entry.position + 1} · ${phase}`;
 }
 
+/** The glyph inside a red status icon, one per kind of blocker. */
+const BLOCKER_GLYPHS: Record<Blocker, string> = { conflicts: 'conflicts', 'changes requested': 'changes', 'failing checks': 'checks', blocked: 'rules' };
+
 function statusIcon(pull: PullRequest): string {
   const status = prStatus(pull);
-  const failing = isFailing(pull) ? describeFailingChecks(pull) : '';
-  const label = status.tone === 'queued' ? queueLabel(pull) : failing === '' ? status.label : `${status.label} · ${failing}`;
-  return `<span class="status ${status.tone}" title="${escapeHtml(label)}"></span>`;
+  const label = status.tone === 'queued' ? queueLabel(pull) : status.blocker != null ? describeBlockers(pull).join(' · ') : status.label;
+  return `<span class="status ${status.tone}${status.blocker != null ? ` ${BLOCKER_GLYPHS[status.blocker]}` : ''}" title="${escapeHtml(label)}"></span>`;
 }
 
 function checksIcon(pull: PullRequest): string {

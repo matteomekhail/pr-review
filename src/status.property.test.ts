@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import fc from 'fast-check';
 import { isReady, matchesSmartFilter, sortPulls, type SmartFilter, type SortOrder } from './smart';
-import { ATTENTION_ORDER, attentionReasons, buildAgentPrompt, isConflicted, isFailing, needsAttention, prStatus } from './status';
+import { ATTENTION_ORDER, attentionReasons, blockers, buildAgentPrompt, isConflicted, isFailing, needsAttention, prStatus } from './status';
 import { FIXED_NOW, pullArbitrary, pullListArbitrary } from './testing/arbitraries';
 
 const RUNS = { numRuns: Number(process.env.PROPERTY_RUNS ?? 2_000) };
@@ -24,7 +24,8 @@ describe('status invariants', () => {
   test('every pull gets exactly one status, and red is exactly the blocking conditions', () => {
     fc.assert(
       fc.property(pullArbitrary, (pull) => {
-        const { tone } = prStatus(pull);
+        const { tone, blocker } = prStatus(pull);
+        expect(blocker).toBe(tone === 'blocked' ? blockers(pull)[0] : undefined);
         const isBlocking = isConflicted(pull) || isFailing(pull) || pull.reviewDecision === 'CHANGES_REQUESTED' || (pull.reviewDecision === 'APPROVED' && pull.mergeStateStatus === 'BLOCKED');
         if (pull.queueEntry != null) expect(tone).toBe('queued');
         else expect(tone === 'blocked').toBe(isBlocking);
