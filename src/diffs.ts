@@ -26,8 +26,8 @@ type ViewOptions = NonNullable<ConstructorParameters<typeof CodeView<undefined, 
 
 const WORKER_COUNT = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 2));
 const LARGE_FILE_LINES = 1500;
-/** Lines one click on a separator reveals, as on GitHub; shift-click or "Expand all" reveals the whole gap. */
-const EXPANSION_LINES = 20;
+/** One click on a separator reveals the whole gap: the file is already loaded, so GitHub's 20 lines at a time only costs clicks. */
+const EXPANSION_LINES = Number.POSITIVE_INFINITY;
 const GENERATED_FILE = /(^|\/)(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock)$|\.snap$|\.min\.(js|css)$/;
 
 const HEADER_CSS = `

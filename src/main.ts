@@ -40,7 +40,8 @@ interface State {
   filter: string;
   smartFilter: SmartFilter;
   repoFilter: string;
-  labelFilter: string;
+  /** A PR shows when it has any of these; none means no label filter. */
+  labelFilter: string[];
   askScope: AskScope;
   mergedPeriod: MergedPeriod;
   /** Whose merged PRs: empty for everyone, `@me`, or a login. */
@@ -94,6 +95,7 @@ const dom = {
   sortButton: element<HTMLButtonElement>('sort-button'),
   groupButton: element<HTMLButtonElement>('group-button'),
   fixButton: element<HTMLButtonElement>('fix-button'),
+  labelButton: element<HTMLButtonElement>('label-button'),
   bulkBar: element('bulk-bar'),
   bulkCount: element('bulk-count'),
   bulkMerge: element<HTMLButtonElement>('bulk-merge'),
@@ -114,13 +116,22 @@ const dom = {
   toast: element('toast'),
 };
 
+function storedLabels(): string[] {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem('labelFilter') ?? '[]');
+    return Array.isArray(stored) ? stored.filter((label): label is string => typeof label === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 const state: State = {
   kind: 'mine',
   pulls: [],
   filter: '',
   smartFilter: ((['all', 'ready', 'attention', 'waiting', 'small', 'recent', 'tested'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
   repoFilter: localStorage.getItem('repoFilter') ?? '',
-  labelFilter: localStorage.getItem('labelFilter') ?? '',
+  labelFilter: storedLabels(),
   askScope: (['me', 'team'] as const).find((scope) => scope === localStorage.getItem('askScope')) ?? 'all',
   mergedPeriod: (Object.keys(MERGED_PERIODS) as MergedPeriod[]).find((period) => period === localStorage.getItem('mergedPeriod')) ?? '7d',
   mergedAuthor: localStorage.getItem('mergedAuthor') ?? '',
@@ -380,7 +391,7 @@ function matchesRepo(pull: PullRequest): boolean {
 }
 
 function matchesLabel(pull: PullRequest): boolean {
-  return state.labelFilter === '' || pull.labels.includes(state.labelFilter);
+  return state.labelFilter.length === 0 || pull.labels.some((label) => state.labelFilter.includes(label));
 }
 
 /** The repository, label, review-request and smart filters, shared by the list and the tab counts; text search is left to the list. */
@@ -396,7 +407,7 @@ function matchesFilters(pull: PullRequest, now: number, kind: QueueKind = state.
 
 /** The current queue narrowed to the chosen repository and label, before any other filter. */
 function repoPulls(): PullRequest[] {
-  return state.repoFilter === '' && state.labelFilter === '' ? state.pulls : state.pulls.filter((pull) => matchesRepo(pull) && matchesLabel(pull));
+  return state.repoFilter === '' && state.labelFilter.length === 0 ? state.pulls : state.pulls.filter((pull) => matchesRepo(pull) && matchesLabel(pull));
 }
 
 /** The current queue narrowed to the chosen repository and review requests: what the smart filters count from. */
@@ -412,7 +423,7 @@ function computeLists(): void {
   const now = Date.now();
   const matching = state.pulls.filter((pull) => matchesFilters(pull, now) && matchesText(pull, needle));
   const ranked = state.kind === 'merged' ? [...matching].sort((left, right) => Date.parse(right.mergedAt ?? '') - Date.parse(left.mergedAt ?? '')) : sortPulls(matching, state.sortOrder, now, aiScoreFor);
-  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.kind === 'merged' ? mergedKey() : '', state.repoFilter, state.labelFilter, state.askScope, state.smartFilter, state.sortOrder, needle, isGroupingOn()].join('|'));
+  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.kind === 'merged' ? mergedKey() : '', state.repoFilter, state.labelFilter.join(','), state.askScope, state.smartFilter, state.sortOrder, needle, isGroupingOn()].join('|'));
   visibleCache = !isGroupingOn() || groups.length === 0 ? filteredCache : listSections(filteredCache).flatMap((section) => (section.group != null && collapsedGroups.has(section.group.id) ? [] : section.pulls));
 }
 
@@ -427,6 +438,7 @@ function visiblePulls(): PullRequest[] {
 }
 
 const sliceMenu = new PopoverMenu('What to show');
+const labelMenu = new PopoverMenu('Labels');
 const sortMenu = new PopoverMenu('Sort');
 
 const SMART_LABELS: Record<SmartFilter, string> = { all: 'All', ready: 'Ready', attention: 'Unready', waiting: 'Waiting', small: 'Small', recent: 'Recent', tested: 'Tested' };
@@ -440,8 +452,8 @@ function mergedAuthorLabel(author: string): string {
 
 /** The selector names the filters in effect, or All; on Merged, the period and author. The repository goes last, so a long name is what gets cut. */
 function sliceLabel(): string {
-  if (state.kind === 'merged') return [MERGED_PERIODS[state.mergedPeriod], mergedAuthorLabel(state.mergedAuthor), state.labelFilter].filter((part) => part !== '').join(' · ');
-  const parts = [hasAskScope(state.kind) && state.askScope !== 'all' ? ASK_LABELS[state.askScope] : '', state.smartFilter === 'all' ? '' : SMART_LABELS[state.smartFilter], state.labelFilter, state.repoFilter === '' ? '' : (state.repoFilter.split('/')[1] ?? state.repoFilter)];
+  if (state.kind === 'merged') return `${MERGED_PERIODS[state.mergedPeriod]} · ${mergedAuthorLabel(state.mergedAuthor)}`;
+  const parts = [hasAskScope(state.kind) && state.askScope !== 'all' ? ASK_LABELS[state.askScope] : '', state.smartFilter === 'all' ? '' : SMART_LABELS[state.smartFilter], state.repoFilter === '' ? '' : (state.repoFilter.split('/')[1] ?? state.repoFilter)];
   return parts.filter((part) => part !== '').join(' · ') || 'All';
 }
 
@@ -453,16 +465,17 @@ function renderSlice(): void {
   dom.fixButton.hidden = state.kind === 'merged';
   dom.groupButton.setAttribute('aria-pressed', String(isGrouped));
   dom.groupButton.dataset.tip = `${isGrouped ? 'Ungroup' : 'Group related work'}  ⇧T`;
+  dom.labelButton.setAttribute('aria-pressed', String(state.labelFilter.length > 0));
+  dom.labelButton.dataset.tip = `${state.labelFilter.length === 0 ? 'Filter by label' : `Labels: ${state.labelFilter.join(', ')}`}  ⇧L`;
   sliceMenu.refresh();
+  labelMenu.refresh();
   sortMenu.refresh();
 }
 
-/** What the selector offers: open work filters by requests (where they apply), state, repository and label; Merged by period, author, repository and label. */
+/** What the selector offers: open work filters by requests (where they apply), state and repository; Merged by period and author. Labels have their own menu. */
 function sliceSections(): MenuSection[] {
-  const label = labelSection();
-  const labels = label == null ? [] : [label];
-  if (state.kind === 'merged') return [periodSection(), authorSection(), repoSection(), ...labels];
-  return [...(hasAskScope(state.kind) ? [requestSection()] : []), showSection(), repoSection(), ...labels];
+  if (state.kind === 'merged') return [periodSection(), authorSection(), repoSection()];
+  return [...(hasAskScope(state.kind) ? [requestSection()] : []), showSection(), repoSection()];
 }
 
 function requestSection(): MenuSection {
@@ -502,18 +515,18 @@ function repoSection(): MenuSection {
   };
 }
 
-/** Labels on the chosen repository's PRs here, commonest first; left out when nothing here has one. */
-function labelSection(): MenuSection | null {
+/** Labels on the chosen repository's PRs here, commonest first; picking one adds it to the filter or takes it out. Chosen labels stay listed at zero. */
+function labelSections(): MenuSection[] {
   const pulls = state.pulls.filter(matchesRepo);
   const counts = new Map<string, number>();
   pulls.forEach((pull) => pull.labels.forEach((label) => counts.set(label, (counts.get(label) ?? 0) + 1)));
-  if (state.labelFilter !== '' && !counts.has(state.labelFilter)) counts.set(state.labelFilter, 0);
-  if (counts.size === 0) return null;
+  state.labelFilter.forEach((label) => counts.has(label) || counts.set(label, 0));
+  if (counts.size === 0) return [{ items: [{ label: 'No labels in this view', run: () => undefined }] }];
   const labels = [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
-  return {
-    title: 'Label',
-    items: [{ label: 'Any label', count: String(pulls.length), checked: state.labelFilter === '', run: () => setLabelFilter('') }, ...labels.map(([label, count]) => ({ label, count: String(count), checked: state.labelFilter === label, run: () => setLabelFilter(label) }))],
-  };
+  return [
+    { items: [{ label: 'Any label', count: String(pulls.length), checked: state.labelFilter.length === 0, run: () => setLabelFilter([]) }] },
+    { title: 'Has any of', isMulti: true, items: labels.map(([label, count]) => ({ label, count: String(count), checked: state.labelFilter.includes(label), run: () => toggleLabel(label) })) },
+  ];
 }
 
 function periodSection(): MenuSection {
@@ -545,7 +558,14 @@ function sortSections(): MenuSection[] {
 
 function openSliceMenu(): void {
   sortMenu.close();
+  labelMenu.close();
   sliceMenu.toggle(dom.sliceButton, sliceSections);
+}
+
+function openLabelMenu(): void {
+  sliceMenu.close();
+  sortMenu.close();
+  labelMenu.toggle(dom.labelButton, labelSections, 'end');
 }
 
 /** GitHub returns at most 1,000 results; say so when a merged search was cut short. */
@@ -585,9 +605,14 @@ function setRepoFilter(repo: string): void {
   if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
 }
 
-function setLabelFilter(label: string): void {
-  state.labelFilter = label;
-  localStorage.setItem('labelFilter', label);
+function toggleLabel(label: string): void {
+  setLabelFilter(state.labelFilter.includes(label) ? state.labelFilter.filter((chosen) => chosen !== label) : [...state.labelFilter, label]);
+}
+
+/** Always a fresh array: the list cache notices the filter changed by identity. */
+function setLabelFilter(labels: string[]): void {
+  state.labelFilter = labels;
+  localStorage.setItem('labelFilter', JSON.stringify(labels));
   renderList();
   const first = visiblePulls()[0];
   if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
@@ -864,7 +889,7 @@ function renderListEmpty(count: number, needle: string): void {
   const kind = count > 0 || isBooting ? '' : isSearching ? 'searching' : isAwaiting ? 'checking' : state.pulls.length === 0 ? 'empty' : needle !== '' ? 'no-results' : 'filtered';
   const filterLabel = state.smartFilter === 'ready' ? 'Ready' : state.smartFilter === 'attention' ? 'Unready' : state.smartFilter;
   const repoLabel = state.repoFilter.split('/')[1] ?? state.repoFilter;
-  const where = [repoLabel === '' ? '' : `in ${repoLabel}`, state.labelFilter === '' ? '' : `labelled ${state.labelFilter}`].filter((part) => part !== '').join(' ');
+  const where = [repoLabel === '' ? '' : `in ${repoLabel}`, state.labelFilter.length === 0 ? '' : `labelled ${state.labelFilter.join(' or ')}`].filter((part) => part !== '').join(' ');
   const scope = hasAskScope(state.kind) ? state.askScope : 'all';
   const signature = [kind, filterLabel, where, scope, needle].join('|');
   if (box.dataset.signature === signature) return;
@@ -2659,6 +2684,7 @@ const COMMANDS: Command[] = [
   { id: 'ask-team', section: 'Filter', title: 'Only team: review requests to my teams', aliases: 'team group codeowners engineering scope', keys: ['⌥7'], run: () => setAskScope('team') },
   { id: 'smart-attention', section: 'Filter', title: 'Show PRs that need attention', aliases: 'unapproved conflicts failing blocked red yellow triage', keys: ['⌥4'], run: () => setSmartFilter('attention') },
   { id: 'filters', section: 'Filter', title: 'What to show: requests, state, repository (period and author on Merged)', aliases: 'filter selector slice scope repo period author', keys: ['⇧f'], run: openSliceMenu },
+  { id: 'labels', section: 'Filter', title: 'Filter by label (any of the chosen ones)', aliases: 'label labels tag tags', keys: ['⇧l'], run: openLabelMenu },
   { id: 'group', section: 'Filter', title: 'Group related work', aliases: 'cluster effort category batch smart group', keys: ['⇧t'], run: toggleGrouping },
   { id: 'regroup', section: 'Filter', title: 'Regroup', aliases: 'refresh groups cluster', keys: [], run: () => { groupsSignature = ''; localStorage.removeItem(GROUPS_CACHE_KEY); void ensureGroups(true); } },
   { id: 'sort', section: 'Filter', title: 'Cycle sort (smart / updated / smallest)', aliases: 'order', keys: ['⇧s'], run: cycleSortOrder },
@@ -2827,8 +2853,10 @@ element('refresh-button').addEventListener('click', manualRefresh);
 dom.sliceButton.addEventListener('click', openSliceMenu);
 dom.groupButton.addEventListener('click', toggleGrouping);
 dom.fixButton.addEventListener('click', openTriage);
+dom.labelButton.addEventListener('click', openLabelMenu);
 dom.sortButton.addEventListener('click', () => {
   sliceMenu.close();
+  labelMenu.close();
   sortMenu.toggle(dom.sortButton, sortSections, 'end');
 });
 element('list-empty').addEventListener('click', (event) => {
@@ -2838,7 +2866,7 @@ element('list-empty').addEventListener('click', (event) => {
     dom.filter.dispatchEvent(new Event('input', { bubbles: true }));
   } else if (action === 'show-all') {
     if (state.repoFilter !== '') setRepoFilter('');
-    if (state.labelFilter !== '') setLabelFilter('');
+    if (state.labelFilter.length > 0) setLabelFilter([]);
     if (state.askScope !== 'all') setAskScope('all');
     if (state.smartFilter !== 'all') setSmartFilter('all');
   }

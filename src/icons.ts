@@ -21,6 +21,7 @@ const PATHS = {
   chevronDown: '<path d="m6 9 6 6 6-6" />',
   circleDot: '<circle cx="12" cy="12" r="9" /> <circle cx="12" cy="12" r="3" fill="currentColor" />',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /> <circle cx="12" cy="12" r="3" />',
+  tag: '<path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" /> <circle cx="7.5" cy="7.5" r=".5" fill="currentColor" />',
   sort: '<path d="m3 16 4 4 4-4" /> <path d="M7 20V4" /> <path d="m21 8-4-4-4 4" /> <path d="M17 4v16" />',
   chevronLeft: '<path d="m15 18-6-6 6-6" />',
   x: '<path d="M18 6 6 18" /> <path d="m6 6 12 12" />',

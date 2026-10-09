@@ -11,6 +11,8 @@ export interface MenuItem {
 
 export interface MenuSection {
   title?: string;
+  /** Items are checkboxes rather than radios: several can be on at once. */
+  isMulti?: boolean;
   items: MenuItem[];
 }
 
@@ -104,10 +106,11 @@ export class PopoverMenu {
     this.root.innerHTML = sections
       .map((section) => {
         const title = section.title == null ? '' : `<div class="menu-title">${escapeHtml(section.title)}</div>`;
+        const role = section.isMulti === true ? 'menuitemcheckbox' : 'menuitemradio';
         const items = section.items.map((item) => {
           const position = index++;
           const count = item.count == null ? '' : `<span class="menu-count">${escapeHtml(item.count)}</span>`;
-          return `<button type="button" role="menuitemradio" tabindex="-1" aria-checked="${item.checked === true}" class="menu-item${item.checked === true ? ' checked' : ''}" data-index="${position}"><span class="menu-check">${item.checked === true ? icon('check') : ''}</span><span class="menu-label">${escapeHtml(item.label)}</span>${count}<span class="menu-hint">${escapeHtml(item.hint ?? '')}</span></button>`;
+          return `<button type="button" role="${role}" tabindex="-1" aria-checked="${item.checked === true}" class="menu-item${item.checked === true ? ' checked' : ''}" data-index="${position}"><span class="menu-check">${item.checked === true ? icon('check') : ''}</span><span class="menu-label">${escapeHtml(item.label)}</span>${count}<span class="menu-hint">${escapeHtml(item.hint ?? '')}</span></button>`;
         });
         return `${title}${items.join('')}`;
       })
