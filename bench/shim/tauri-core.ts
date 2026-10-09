@@ -1,5 +1,6 @@
 import { DEMO_CONFLICTS, DEMO_PULLS, DEMO_TEAMS, DEMO_VIEWER, demoBody, demoConversation, demoDiff } from '../demo';
 import { generateBody, generateDiff, generatePulls, type FixturePull } from '../fixtures';
+import { parsePatchFiles } from '@pierre/diffs';
 
 const COUNT = Number(new URLSearchParams(location.search).get('pulls') ?? 120);
 const LATENCY_MS = Number(new URLSearchParams(location.search).get('latency') ?? 0);
@@ -8,6 +9,24 @@ const pulls = IS_DEMO ? DEMO_PULLS : generatePulls(COUNT);
 const byId = new Map(pulls.map((pull) => [pull.id, pull]));
 const byNumber = new Map(pulls.map((pull) => [pull.number, pull]));
 const calls: Record<string, number> = {};
+
+function diffOf(pull: FixturePull): string {
+  return (IS_DEMO ? demoDiff(pull) : null) ?? generateDiff(pull);
+}
+
+/** A head file that agrees with the fixture diff: its hunks where the patch puts them, filler lines around them. */
+function headFile(patch: string, path: string): string {
+  const file = parsePatchFiles(patch, 'shim').flatMap((parsed) => parsed.files).find((candidate) => candidate.name === path);
+  if (file == null) throw new Error(`harness: no ${path} in the diff`);
+  const lines: string[] = [];
+  const filler = (): number => lines.push(`// unchanged line ${lines.length + 1}\n`);
+  for (const hunk of file.hunks) {
+    while (lines.length < hunk.additionStart - (hunk.additionCount === 0 ? 0 : 1)) filler();
+    lines.push(...file.additionLines.slice(hunk.additionLineIndex, hunk.additionLineIndex + hunk.additionCount));
+  }
+  for (let index = 0; index < 40; index++) filler();
+  return lines.join('');
+}
 
 Object.assign(window, { __shimCalls: calls, __shimPulls: pulls });
 
@@ -34,7 +53,11 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const pull = byNumber.get(args.number as number) ?? pulls[0]!;
     return IS_DEMO ? demoBody(pull) : generateBody(pull);
   },
-  diff: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; return (IS_DEMO ? demoDiff(pull) : null) ?? generateDiff(pull); },
+  diff: (args) => diffOf(byNumber.get(args.number as number) ?? pulls[0]!),
+  file_at: (args) => {
+    const pull = pulls.find((candidate) => candidate.headRefOid === args.rev) ?? pulls[0]!;
+    return headFile(diffOf(pull), String(args.path));
+  },
   conversation: (args) => IS_DEMO ? JSON.stringify(demoConversation(byNumber.get(args.number as number) ?? pulls[0]!)) : JSON.stringify({ data: { repository: { pullRequest: { comments: { totalCount: 2, nodes: [
     { id: 'c1', bodyHTML: `<p>Long review note.</p>${'<p>Line of detail that goes on for a while to make this comment tall.</p>'.repeat(30)}`, createdAt: '2026-09-26T10:00:00Z', url: 'https://github.com/o/web/pull/1#c1', author: { login: 'reviewer', avatarUrl: '', __typename: 'User' } },
     { id: 'c3', bodyHTML: '<h3>🚀 Web Preview Deployed</h3><p><a href="https://pr-47520.preview.acme.dev">https://pr-47520.preview.acme.dev</a></p>', createdAt: '2026-09-26T11:30:00Z', url: 'https://github.com/o/web/pull/1#c3', author: { login: 'github-actions', avatarUrl: '', __typename: 'Bot' } },

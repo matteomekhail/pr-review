@@ -214,6 +214,11 @@ export function fetchDiff(pull: PullRequest): Promise<string> {
   return invoke<string>('diff', { repo: pull.repository.nameWithOwner, number: pull.number });
 }
 
+/** A file's contents at a commit. */
+export function fetchFileAt(repo: string, rev: string, path: string): Promise<string> {
+  return invoke<string>('file_at', { repo, rev, path });
+}
+
 let viewerLogin: Promise<string | null> | null = null;
 
 export function fetchViewerLogin(): Promise<string | null> {

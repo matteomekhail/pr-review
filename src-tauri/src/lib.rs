@@ -336,6 +336,35 @@ fn file_patch(file: &PullFile) -> String {
     format!("diff --git a/{old_name} b/{}\n{rename}{hunks}", file.filename)
 }
 
+fn is_commit_sha(rev: &str) -> bool {
+    matches!(rev.len(), 40 | 64) && rev.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+/// Percent-encodes a repository path for the contents API, refusing ones that could step outside it.
+fn contents_path(path: &str) -> Result<String, String> {
+    if path.is_empty() || path.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..") || path.contains('\0') {
+        return Err(format!("invalid path: {path}"));
+    }
+    Ok(path
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => (byte as char).to_string(),
+            _ => format!("%{byte:02X}"),
+        })
+        .collect())
+}
+
+/// A file as it is at `rev`, so a diff can show the unchanged lines between its hunks.
+#[tauri::command]
+async fn file_at(repo: String, rev: String, path: String) -> Result<String, String> {
+    validate_repo(&repo)?;
+    if !is_commit_sha(&rev) {
+        return Err(format!("invalid commit: {rev}"));
+    }
+    let endpoint = format!("repos/{repo}/contents/{}?ref={rev}", contents_path(&path)?);
+    gh(&["api", &endpoint, "-H", "Accept: application/vnd.github.raw"]).await
+}
+
 #[tauri::command]
 async fn approve(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
@@ -518,7 +547,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, merged, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, merged, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, file_at, approve, merge, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }
@@ -533,5 +562,16 @@ mod tests {
         assert_eq!(base64("a"), "YQ==");
         assert_eq!(base64("ab"), "YWI=");
         assert_eq!(base64("abc"), "YWJj");
+    }
+
+    #[test]
+    fn contents_paths_are_encoded_and_contained() {
+        assert_eq!(contents_path("src/a b#1.ts").unwrap(), "src/a%20b%231.ts");
+        assert_eq!(contents_path("docs/caffè.md").unwrap(), "docs/caff%C3%A8.md");
+        assert!(contents_path("../secrets").is_err());
+        assert!(contents_path("/etc/passwd").is_err());
+        assert!(contents_path("a//b").is_err());
+        assert!(!is_commit_sha("main"));
+        assert!(is_commit_sha("0123456789abcdef0123456789abcdef01234567"));
     }
 }

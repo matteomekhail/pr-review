@@ -1,7 +1,8 @@
 import { glideScrollBy, glideScrollTo, prefersReducedMotion } from './motion';
-import { CodeView, parsePatchFiles, type CodeViewDiffItem, type FileDiffMetadata } from '@pierre/diffs';
+import { CodeView, parsePatchFiles, type CodeViewDiffItem, type FileDiffLoadedFiles, type FileDiffMetadata } from '@pierre/diffs';
 import { getOrCreateWorkerPoolSingleton } from '@pierre/diffs/worker';
 import DiffWorker from '@pierre/diffs/worker/worker.js?worker';
+import { oldContents } from './hidden-lines';
 
 export type DiffStyle = 'split' | 'unified';
 
@@ -10,7 +11,12 @@ export interface ParsedFile {
   diff: FileDiffMetadata;
   additions: number;
   deletions: number;
+  /** Decided once at parse time: expanding unchanged lines grows the diff in place, and should not collapse it on a revisit. */
+  startsCollapsed: boolean;
 }
+
+/** The file's contents at the pull request's head, by path. */
+export type HeadFileLoader = (path: string) => Promise<string>;
 
 interface DiffViewCallbacks {
   onToggle(id: string, isCollapsed: boolean): void;
@@ -20,6 +26,8 @@ type ViewOptions = NonNullable<ConstructorParameters<typeof CodeView<undefined, 
 
 const WORKER_COUNT = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 2));
 const LARGE_FILE_LINES = 1500;
+/** Lines one click on a separator reveals, as on GitHub; shift-click or "Expand all" reveals the whole gap. */
+const EXPANSION_LINES = 20;
 const GENERATED_FILE = /(^|\/)(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock)$|\.snap$|\.min\.(js|css)$/;
 
 const HEADER_CSS = `
@@ -49,11 +57,11 @@ function countChanges(diff: FileDiffMetadata): { additions: number; deletions: n
 export function parseDiff(cacheKey: string, patch: string): ParsedFile[] {
   return parsePatchFiles(patch, cacheKey)
     .flatMap((parsed) => parsed.files)
-    .map((diff, index) => ({ id: `${index}:${diff.name}`, diff, ...countChanges(diff) }));
+    .map((diff, index) => ({ id: `${index}:${diff.name}`, diff, ...countChanges(diff), startsCollapsed: shouldStartCollapsed(diff) }));
 }
 
-function shouldStartCollapsed(file: ParsedFile): boolean {
-  return GENERATED_FILE.test(file.diff.name) || file.diff.unifiedLineCount > LARGE_FILE_LINES;
+function shouldStartCollapsed(diff: FileDiffMetadata): boolean {
+  return GENERATED_FILE.test(diff.name) || diff.unifiedLineCount > LARGE_FILE_LINES;
 }
 
 function chevron(id: string, isCollapsed: boolean): HTMLElement {
@@ -75,6 +83,7 @@ export class DiffView {
   private diffStyle: DiffStyle;
   private collapsed = new Set<string>();
   private ids: string[] = [];
+  private readonly headFiles = new WeakMap<FileDiffMetadata, HeadFileLoader>();
 
   constructor(root: HTMLElement, diffStyle: DiffStyle, callbacks: DiffViewCallbacks) {
     this.root = root;
@@ -90,9 +99,11 @@ export class DiffView {
     this.view.setOptions(this.options());
   }
 
-  show(files: readonly ParsedFile[]): void {
+  /** `loadHeadFile` lets the separators expand; the files are only asked for when a separator is clicked (or prefetched). */
+  show(files: readonly ParsedFile[], loadHeadFile?: HeadFileLoader): void {
+    if (loadHeadFile != null) files.forEach((file) => this.headFiles.set(file.diff, loadHeadFile));
     this.ids = files.map((file) => file.id);
-    this.collapsed = new Set(files.filter(shouldStartCollapsed).map((file) => file.id));
+    this.collapsed = new Set(files.filter((file) => file.startsCollapsed).map((file) => file.id));
     this.view.setItems(files.map((file): CodeViewDiffItem => ({ id: file.id, type: 'diff', fileDiff: file.diff, collapsed: this.collapsed.has(file.id) })));
     this.root.scrollTop = 0;
   }
@@ -177,6 +188,8 @@ export class DiffView {
       diffIndicators: 'bars',
       lineDiffType: 'word-alt',
       hunkSeparators: 'line-info',
+      expansionLineCount: EXPANSION_LINES,
+      loadDiffFiles: this.loadDiffFiles,
       overflow: 'scroll',
       stickyHeaders: true,
       unsafeCSS: this.isFlush ? `${HEADER_CSS}${FLUSH_CSS}` : HEADER_CSS,
@@ -185,6 +198,13 @@ export class DiffView {
       renderHeaderPrefix: (_fileDiff, context) => chevron(context.item.id, this.collapsed.has(context.item.id)),
     };
   }
+
+  private readonly loadDiffFiles = async (diff: FileDiffMetadata): Promise<FileDiffLoadedFiles> => {
+    const load = this.headFiles.get(diff);
+    if (load == null) throw new Error(`No head file for ${diff.name}`);
+    const contents = await load(diff.name);
+    return { oldFile: { name: diff.prevName ?? diff.name, contents: oldContents(diff, contents) }, newFile: { name: diff.name, contents } };
+  };
 
   private readonly handleHeaderClick = (event: MouseEvent): void => {
     const path = event.composedPath();

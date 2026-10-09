@@ -10,6 +10,8 @@ import { ThemePicker } from './theme-picker';
 import './styles.css';
 import { approvePull, commentOnPull, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
 import { DiffView, parseDiff, type DiffStyle, type ParsedFile } from './diffs';
+import { hasHiddenLines } from './hidden-lines';
+import { cancelFullFilePrefetch, fullFile, prefetchFullFiles } from './full-files';
 import { sanitizeHtml } from './sanitize';
 import { CommandRegistry, renderShortcut, type Command } from './commands';
 import { Layout, type LayoutPreset } from './layout';
@@ -1343,8 +1345,22 @@ function resetScrollForNewPull(pull: PullRequest): void {
   dom.files.scrollTop = 0;
 }
 
+/** Fetching every changed file waits until the diff is on screen and the selection has stopped moving. */
+const FULL_FILE_PREFETCH_DELAY_MS = 400;
+
+/** The diff comes first; the files behind its "unmodified lines" separators follow quietly, so an expand click is instant. */
+function prefetchHiddenLines(pull: PullRequest, files: readonly ParsedFile[], token: number): void {
+  const repo = pull.repository.nameWithOwner;
+  const paths = files.filter((file) => hasHiddenLines(file) && !file.startsCollapsed).map((file) => file.diff.name);
+  if (paths.length === 0) return;
+  window.setTimeout(() => {
+    if (token === renderToken) prefetchFullFiles(repo, pull.headRefOid, paths);
+  }, FULL_FILE_PREFETCH_DELAY_MS);
+}
+
 async function renderSelection(pull: PullRequest): Promise<void> {
   const token = ++renderToken;
+  cancelFullFilePrefetch();
   resetScrollForNewPull(pull);
   dom.empty.hidden = true;
   dom.pr.hidden = false;
@@ -1365,8 +1381,9 @@ async function renderSelection(pull: PullRequest): Promise<void> {
     const files = await diffPromise;
     if (token !== renderToken) return;
     currentFiles = files;
-    diffView.show(files);
+    diffView.show(files, (path) => fullFile(pull.repository.nameWithOwner, pull.headRefOid, path));
     renderFiles(files);
+    prefetchHiddenLines(pull, files, token);
   } catch (error) {
     if (token !== renderToken) return;
     dom.files.innerHTML = `<div class="error pad">${escapeHtml(errorMessage(error))}</div>`;
