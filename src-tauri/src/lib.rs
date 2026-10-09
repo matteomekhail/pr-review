@@ -11,6 +11,7 @@ const QUEUE_FIELDS: &str = r#"
   mergeQueueEntry { position state }
   author { login avatarUrl }
   repository { nameWithOwner }
+  labels(first: 20) { nodes { name } }
   commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login avatarUrl } ... on Team { name combinedSlug } } } }
   reviews(last: 20) { nodes { state submittedAt author { login avatarUrl __typename } } }
@@ -26,6 +27,7 @@ const MERGED_FIELDS: &str = r#"
   headRefName headRefOid baseRefName
   author { login avatarUrl }
   repository { nameWithOwner }
+  labels(first: 20) { nodes { name } }
 }"#;
 const MERGED_PAGE_SIZE: u64 = 100;
 

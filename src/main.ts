@@ -40,6 +40,7 @@ interface State {
   filter: string;
   smartFilter: SmartFilter;
   repoFilter: string;
+  labelFilter: string;
   askScope: AskScope;
   mergedPeriod: MergedPeriod;
   /** Whose merged PRs: empty for everyone, `@me`, or a login. */
@@ -119,6 +120,7 @@ const state: State = {
   filter: '',
   smartFilter: ((['all', 'ready', 'attention', 'waiting', 'small', 'recent', 'tested'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
   repoFilter: localStorage.getItem('repoFilter') ?? '',
+  labelFilter: localStorage.getItem('labelFilter') ?? '',
   askScope: (['me', 'team'] as const).find((scope) => scope === localStorage.getItem('askScope')) ?? 'all',
   mergedPeriod: (Object.keys(MERGED_PERIODS) as MergedPeriod[]).find((period) => period === localStorage.getItem('mergedPeriod')) ?? '7d',
   mergedAuthor: localStorage.getItem('mergedAuthor') ?? '',
@@ -343,7 +345,7 @@ function resetTurns(): void {
 }
 
 function currentListKey(): string {
-  return [listVersion, leaving.size, state.pulls, state.filter, state.smartFilter, state.repoFilter, state.askScope, state.sortOrder, isGroupingOn(), groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
+  return [listVersion, leaving.size, state.pulls, state.filter, state.smartFilter, state.repoFilter, state.labelFilter, state.askScope, state.sortOrder, isGroupingOn(), groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
 }
 
 const objectIds = new WeakMap<object, number>();
@@ -373,9 +375,17 @@ function matchesAskScope(pull: PullRequest, kind: QueueKind): boolean {
   return !hasAskScope(kind) || inAskScope(askFor(pull), state.askScope);
 }
 
-/** The repository, review-request and smart filters, shared by the list and the tab counts; text search is left to the list. */
+function matchesRepo(pull: PullRequest): boolean {
+  return state.repoFilter === '' || pull.repository.nameWithOwner === state.repoFilter;
+}
+
+function matchesLabel(pull: PullRequest): boolean {
+  return state.labelFilter === '' || pull.labels.includes(state.labelFilter);
+}
+
+/** The repository, label, review-request and smart filters, shared by the list and the tab counts; text search is left to the list. */
 function matchesFilters(pull: PullRequest, now: number, kind: QueueKind = state.kind): boolean {
-  if (state.repoFilter !== '' && pull.repository.nameWithOwner !== state.repoFilter) return false;
+  if (!matchesRepo(pull) || !matchesLabel(pull)) return false;
   if (kind === 'merged') return true;
   if (!matchesAskScope(pull, kind)) return false;
   if (state.smartFilter === 'waiting') return turnFor(pull)?.whose === 'theirs';
@@ -384,9 +394,9 @@ function matchesFilters(pull: PullRequest, now: number, kind: QueueKind = state.
   return matchesSmartFilter(pull, state.smartFilter, now);
 }
 
-/** The current queue narrowed to the chosen repository, before any other filter. */
+/** The current queue narrowed to the chosen repository and label, before any other filter. */
 function repoPulls(): PullRequest[] {
-  return state.repoFilter === '' ? state.pulls : state.pulls.filter((pull) => pull.repository.nameWithOwner === state.repoFilter);
+  return state.repoFilter === '' && state.labelFilter === '' ? state.pulls : state.pulls.filter((pull) => matchesRepo(pull) && matchesLabel(pull));
 }
 
 /** The current queue narrowed to the chosen repository and review requests: what the smart filters count from. */
@@ -402,7 +412,7 @@ function computeLists(): void {
   const now = Date.now();
   const matching = state.pulls.filter((pull) => matchesFilters(pull, now) && matchesText(pull, needle));
   const ranked = state.kind === 'merged' ? [...matching].sort((left, right) => Date.parse(right.mergedAt ?? '') - Date.parse(left.mergedAt ?? '')) : sortPulls(matching, state.sortOrder, now, aiScoreFor);
-  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.kind === 'merged' ? mergedKey() : '', state.repoFilter, state.askScope, state.smartFilter, state.sortOrder, needle, isGroupingOn()].join('|'));
+  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.kind === 'merged' ? mergedKey() : '', state.repoFilter, state.labelFilter, state.askScope, state.smartFilter, state.sortOrder, needle, isGroupingOn()].join('|'));
   visibleCache = !isGroupingOn() || groups.length === 0 ? filteredCache : listSections(filteredCache).flatMap((section) => (section.group != null && collapsedGroups.has(section.group.id) ? [] : section.pulls));
 }
 
@@ -430,8 +440,8 @@ function mergedAuthorLabel(author: string): string {
 
 /** The selector names the filters in effect, or All; on Merged, the period and author. The repository goes last, so a long name is what gets cut. */
 function sliceLabel(): string {
-  if (state.kind === 'merged') return `${MERGED_PERIODS[state.mergedPeriod]} · ${mergedAuthorLabel(state.mergedAuthor)}`;
-  const parts = [hasAskScope(state.kind) && state.askScope !== 'all' ? ASK_LABELS[state.askScope] : '', state.smartFilter === 'all' ? '' : SMART_LABELS[state.smartFilter], state.repoFilter === '' ? '' : (state.repoFilter.split('/')[1] ?? state.repoFilter)];
+  if (state.kind === 'merged') return [MERGED_PERIODS[state.mergedPeriod], mergedAuthorLabel(state.mergedAuthor), state.labelFilter].filter((part) => part !== '').join(' · ');
+  const parts = [hasAskScope(state.kind) && state.askScope !== 'all' ? ASK_LABELS[state.askScope] : '', state.smartFilter === 'all' ? '' : SMART_LABELS[state.smartFilter], state.labelFilter, state.repoFilter === '' ? '' : (state.repoFilter.split('/')[1] ?? state.repoFilter)];
   return parts.filter((part) => part !== '').join(' · ') || 'All';
 }
 
@@ -447,10 +457,12 @@ function renderSlice(): void {
   sortMenu.refresh();
 }
 
-/** What the selector offers: open work filters by requests (where they apply), state and repository; Merged by period and author. */
+/** What the selector offers: open work filters by requests (where they apply), state, repository and label; Merged by period, author, repository and label. */
 function sliceSections(): MenuSection[] {
-  if (state.kind === 'merged') return [periodSection(), authorSection(), repoSection()];
-  return [...(hasAskScope(state.kind) ? [requestSection()] : []), showSection(), repoSection()];
+  const label = labelSection();
+  const labels = label == null ? [] : [label];
+  if (state.kind === 'merged') return [periodSection(), authorSection(), repoSection(), ...labels];
+  return [...(hasAskScope(state.kind) ? [requestSection()] : []), showSection(), repoSection(), ...labels];
 }
 
 function requestSection(): MenuSection {
@@ -490,6 +502,20 @@ function repoSection(): MenuSection {
   };
 }
 
+/** Labels on the chosen repository's PRs here, commonest first; left out when nothing here has one. */
+function labelSection(): MenuSection | null {
+  const pulls = state.pulls.filter(matchesRepo);
+  const counts = new Map<string, number>();
+  pulls.forEach((pull) => pull.labels.forEach((label) => counts.set(label, (counts.get(label) ?? 0) + 1)));
+  if (state.labelFilter !== '' && !counts.has(state.labelFilter)) counts.set(state.labelFilter, 0);
+  if (counts.size === 0) return null;
+  const labels = [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  return {
+    title: 'Label',
+    items: [{ label: 'Any label', count: String(pulls.length), checked: state.labelFilter === '', run: () => setLabelFilter('') }, ...labels.map(([label, count]) => ({ label, count: String(count), checked: state.labelFilter === label, run: () => setLabelFilter(label) }))],
+  };
+}
+
 function periodSection(): MenuSection {
   return {
     title: 'Period',
@@ -502,7 +528,7 @@ function periodSection(): MenuSection {
 
 /** Everyone, me, then whoever merged in the period, most first (counted from everyone's search once it has run). */
 function authorSection(): MenuSection {
-  const repoMatch = (pull: PullRequest): boolean => state.repoFilter === '' || pull.repository.nameWithOwner === state.repoFilter;
+  const repoMatch = (pull: PullRequest): boolean => matchesRepo(pull) && matchesLabel(pull);
   const everyone = searches.get(mergedKey(''));
   const counts = authorCounts((everyone?.pulls ?? state.pulls).filter(repoMatch));
   const isMe = (login: string): boolean => login.toLowerCase() === viewer?.toLowerCase();
@@ -554,6 +580,14 @@ function setAskScope(scope: AskScope, isToggle = true): void {
 function setRepoFilter(repo: string): void {
   state.repoFilter = repo;
   localStorage.setItem('repoFilter', repo);
+  renderList();
+  const first = visiblePulls()[0];
+  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
+}
+
+function setLabelFilter(label: string): void {
+  state.labelFilter = label;
+  localStorage.setItem('labelFilter', label);
   renderList();
   const first = visiblePulls()[0];
   if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
@@ -830,13 +864,14 @@ function renderListEmpty(count: number, needle: string): void {
   const kind = count > 0 || isBooting ? '' : isSearching ? 'searching' : isAwaiting ? 'checking' : state.pulls.length === 0 ? 'empty' : needle !== '' ? 'no-results' : 'filtered';
   const filterLabel = state.smartFilter === 'ready' ? 'Ready' : state.smartFilter === 'attention' ? 'Unready' : state.smartFilter;
   const repoLabel = state.repoFilter.split('/')[1] ?? state.repoFilter;
+  const where = [repoLabel === '' ? '' : `in ${repoLabel}`, state.labelFilter === '' ? '' : `labelled ${state.labelFilter}`].filter((part) => part !== '').join(' ');
   const scope = hasAskScope(state.kind) ? state.askScope : 'all';
-  const signature = [kind, filterLabel, repoLabel, scope, needle].join('|');
+  const signature = [kind, filterLabel, where, scope, needle].join('|');
   if (box.dataset.signature === signature) return;
   box.dataset.kind = kind;
   box.dataset.signature = signature;
   const scopeTitle = scope === 'me' ? 'Nothing here for you alone right now' : 'No team review requests here right now';
-  const filteredTitle = scope !== 'all' && state.smartFilter === 'all' ? scopeTitle : repoLabel === '' ? `Nothing is ${escapeHtml(filterLabel)} right now` : state.smartFilter === 'all' ? `No pull requests in ${escapeHtml(repoLabel)} here` : `Nothing in ${escapeHtml(repoLabel)} is ${escapeHtml(filterLabel)} right now`;
+  const filteredTitle = scope !== 'all' && state.smartFilter === 'all' ? scopeTitle : where === '' ? `Nothing is ${escapeHtml(filterLabel)} right now` : state.smartFilter === 'all' ? `No pull requests ${escapeHtml(where)} here` : `Nothing ${escapeHtml(where)} is ${escapeHtml(filterLabel)} right now`;
   const views: Record<string, string> = {
     searching: `${icon('search', 'empty-ico')}<b>Searching…</b><span>Looking for “${escapeHtml(needle)}”</span><div class="empty-skel"><span></span><span></span><span></span></div>`,
     checking: `<div class="empty-overlay"><b>Checking merge status…</b><span>Asking GitHub which PRs are ready to merge</span></div>`,
@@ -1769,7 +1804,8 @@ function hydrateSearches(): void {
     Object.entries(cached.mergeStates).forEach(([id, entry]) => mergeStateCache.set(id, entry));
     for (const [key, entry] of Object.entries(cached.searches)) {
       const isKnown = (SEARCH_KINDS as readonly string[]).includes(key) || key === mergedKey();
-      if (isKnown && Array.isArray(entry.pulls) && entry.pulls.every((pull) => pull.activity != null && Array.isArray(pull.failingChecks))) searches.set(key, entry);
+      // Caches from before labels were fetched hold none; the refresh at start fills them in.
+      if (isKnown && Array.isArray(entry.pulls) && entry.pulls.every((pull) => pull.activity != null && Array.isArray(pull.failingChecks))) searches.set(key, { ...entry, pulls: entry.pulls.map((pull) => (Array.isArray(pull.labels) ? pull : { ...pull, labels: [] })) });
     }
     publishQueues(QUEUE_KINDS);
   } catch (error) {
@@ -2802,6 +2838,7 @@ element('list-empty').addEventListener('click', (event) => {
     dom.filter.dispatchEvent(new Event('input', { bubbles: true }));
   } else if (action === 'show-all') {
     if (state.repoFilter !== '') setRepoFilter('');
+    if (state.labelFilter !== '') setLabelFilter('');
     if (state.askScope !== 'all') setAskScope('all');
     if (state.smartFilter !== 'all') setSmartFilter('all');
   }

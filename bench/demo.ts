@@ -69,6 +69,14 @@ const SPECS: DemoSpec[] = [
   { title: 'fix(i18n): pluralize seat counts in German', repo: 'acme/web', hoursAgo: 46, additions: 12, deletions: 4, files: 2, review: 'APPROVED', checks: 'SUCCESS' },
 ];
 
+const TYPE_LABELS: Record<string, string> = { feat: 'feature', fix: 'bug', perf: 'performance', refactor: 'refactor', chore: 'dependencies', docs: 'documentation', test: 'tests' };
+
+/** What a team would put on these: the kind of change from the title, plus needs-qa on the bigger UI work. */
+function demoLabels(spec: DemoSpec): string[] {
+  const kind = TYPE_LABELS[/^([a-z]+)/.exec(spec.title)?.[1] ?? ''];
+  return [kind, spec.repo === 'acme/web' && spec.additions > 150 ? 'needs-qa' : undefined].filter((label): label is string => label != null);
+}
+
 export const DEMO_PULLS: FixturePull[] = SPECS.map((spec, index) => {
   const number = 4812 - index * 3;
   return {
@@ -89,6 +97,7 @@ export const DEMO_PULLS: FixturePull[] = SPECS.map((spec, index) => {
     mergeQueueEntry: spec.queued == null ? null : { position: spec.queued - 1, state: 'AWAITING_CHECKS' },
     author: { login: 'sam-rivera', avatarUrl: '' },
     repository: { nameWithOwner: spec.repo },
+    labels: { nodes: demoLabels(spec).map((name) => ({ name })) },
     commits: { nodes: [{ commit: { committedDate: hoursAgo(commitHoursAgo(index, spec.hoursAgo)), statusCheckRollup: { state: spec.checks, contexts: { nodes: [...demoBotChecks(index), ...demoFailingChecks(spec.checks, index)] } } } }] },
     // Turn demo: every third PR asks the viewer for a review, by name or through their team; another third was reviewed by the viewer, half of those updated since.
     reviewRequests: { nodes: index % 6 === 0 ? [{ requestedReviewer: { __typename: 'User', login: DEMO_VIEWER } }] : index % 6 === 3 ? [{ requestedReviewer: { __typename: 'Team', name: 'Web platform', combinedSlug: 'acme/web-platform' } }, { requestedReviewer: { __typename: 'Team', name: 'Design', combinedSlug: 'acme/design' } }] : [] },

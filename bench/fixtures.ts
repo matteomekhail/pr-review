@@ -16,6 +16,7 @@ export interface FixturePull {
   mergeQueueEntry: { position: number; state: string } | null;
   author: { login: string; avatarUrl: string };
   repository: { nameWithOwner: string };
+  labels?: { nodes: { name: string }[] };
   commits: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: string; contexts?: { nodes: { name: string; status: string; conclusion: string | null }[] } } | null } }[] };
   reviewRequests?: { nodes: { requestedReviewer: { __typename: string; login?: string; name?: string; combinedSlug?: string } | null }[] };
   reviews?: { nodes: { state: string; submittedAt: string; author: { login: string; avatarUrl: string; __typename: string } }[] };
@@ -35,6 +36,8 @@ function mulberry32(seed: number): () => number {
 }
 
 const WORDS = ['refactor', 'feat', 'fix', 'perf', 'test', 'chore', 'share', 'router', 'filter', 'accordion', 'cache', 'billing', 'models', 'sidebar', 'trust-score', 'merge', 'queue', 'i18n', 'dialog', 'icons'];
+
+const FIXTURE_LABELS = ['bug', 'enhancement', 'needs-qa', 'backend', 'frontend', 'dependencies'];
 
 export function generatePulls(count: number, seed = 42): FixturePull[] {
   const random = mulberry32(seed);
@@ -61,6 +64,8 @@ export function generatePulls(count: number, seed = 42): FixturePull[] {
       mergeQueueEntry: random() < 0.08 ? { position: Math.floor(random() * 6), state: 'QUEUED' } : null,
       author: { login: 'author', avatarUrl: '' },
       repository: { nameWithOwner: repo },
+      // From the index, not the generator, so adding labels left every other fixture as it was.
+      labels: { nodes: FIXTURE_LABELS.filter((_, label) => (index + label) % 4 === 0).map((name) => ({ name })) },
       commits: { nodes: [{ commit: { statusCheckRollup: { state: pick(['SUCCESS', 'SUCCESS', 'SUCCESS', 'FAILURE', 'PENDING']) } } }] },
     };
   });

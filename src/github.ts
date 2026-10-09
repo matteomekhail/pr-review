@@ -55,6 +55,8 @@ export interface PullRequest {
   reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
   author: { login: string; avatarUrl: string } | null;
   repository: { nameWithOwner: string };
+  /** Label names, as GitHub orders them. */
+  labels: string[];
   checkState: CheckState | null;
   failingChecks: FailingCheck[];
   mergedAt: string | null;
@@ -76,8 +78,9 @@ interface RawAuthor {
 }
 
 /** A search node. Merged searches leave out the costly fields (decision, checks, activity, queue entry). */
-interface RawPullRequest extends Omit<PullRequest, 'reviewDecision' | 'checkState' | 'failingChecks' | 'mergedAt' | 'mergedBy' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'activity'> {
+interface RawPullRequest extends Omit<PullRequest, 'reviewDecision' | 'checkState' | 'failingChecks' | 'mergedAt' | 'mergedBy' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'activity' | 'labels'> {
   reviewDecision?: PullRequest['reviewDecision'];
+  labels?: { nodes: ({ name: string } | null)[] };
   mergedAt?: string | null;
   mergedBy?: { login: string } | null;
   mergeQueueEntry?: { position: number; state: string } | null;
@@ -136,11 +139,11 @@ function toActivity({ commits, reviewRequests, reviews, comments }: RawPullReque
 }
 
 function toPullRequest(raw: RawPullRequest): PullRequest {
-  const { commits, mergeQueueEntry, mergedBy, reviewRequests: _requests, reviews: _reviews, comments: _comments, ...pull } = raw;
+  const { commits, mergeQueueEntry, mergedBy, labels, reviewRequests: _requests, reviews: _reviews, comments: _comments, ...pull } = raw;
   const rollup = commits?.nodes[0]?.commit.statusCheckRollup;
   const activity = toActivity(raw);
   const reviewDecision = pull.reviewDecision ?? decisionFromVerdicts(pull.author?.login ?? null, activity.reviews);
-  return { ...pull, reviewDecision, mergedAt: pull.mergedAt ?? null, mergedBy: mergedBy?.login ?? null, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: rollup?.state ?? null, failingChecks: toFailingChecks(rollup?.contexts?.nodes ?? []), activity };
+  return { ...pull, labels: (labels?.nodes ?? []).flatMap((label) => (label == null ? [] : [label.name])), reviewDecision, mergedAt: pull.mergedAt ?? null, mergedBy: mergedBy?.login ?? null, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: rollup?.state ?? null, failingChecks: toFailingChecks(rollup?.contexts?.nodes ?? []), activity };
 }
 
 const MERGE_STATE_BATCH = 20;
