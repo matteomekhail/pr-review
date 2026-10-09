@@ -163,6 +163,13 @@ export function addDemoComment(path: string, line: number, side: 'LEFT' | 'RIGHT
   return `https://github.com/acme/web/pull/4812#discussion_r${id}`;
 }
 
+export function setDemoResolved(threadId: string, resolved: boolean): string {
+  const thread = DEMO_THREADS.find((candidate) => candidate.id === threadId);
+  if (thread == null) throw new Error('Could not resolve to a node');
+  thread.isResolved = resolved;
+  return JSON.stringify({ data: { thread: { id: threadId, isResolved: resolved } } });
+}
+
 export function addDemoReply(commentId: number, body: string): string {
   const thread = DEMO_THREADS.find((candidate) => candidate.comments.nodes[0]?.databaseId === commentId);
   if (thread == null) throw new Error('Not Found (HTTP 404)');

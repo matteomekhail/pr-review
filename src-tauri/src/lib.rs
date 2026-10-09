@@ -1,6 +1,8 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::OnceLock;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 const QUEUE_FIELDS: &str = r#"
@@ -32,6 +34,9 @@ const MERGED_FIELDS: &str = r#"
 const MERGED_PAGE_SIZE: u64 = 100;
 
 const MAX_MERGE_STATE_IDS: usize = 25;
+
+/// One page of review threads; the conversation asks for the first, `review_threads` for the rest.
+const THREAD_PAGE: &str = "pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line startLine originalLine diffSide comments(first: 100) { nodes { id databaseId bodyHTML createdAt url diffHunk author { login avatarUrl __typename } pullRequestReview { id } } } }";
 
 const MAX_DIFF_FALLBACK_FILES: usize = 3000;
 const GH_TIMEOUT_SECS: u64 = 45;
@@ -73,16 +78,30 @@ fn gh_binary() -> &'static str {
 }
 
 async fn gh(args: &[&str]) -> Result<String, String> {
-    let child = Command::new(gh_binary())
+    gh_with_input(args, None).await
+}
+
+/// Runs gh, writing `input` to its stdin when given (for `--input -` payloads that flags cannot express).
+async fn gh_with_input(args: &[&str], input: Option<&str>) -> Result<String, String> {
+    let mut command = Command::new(gh_binary());
+    command
         .args(args)
         .env("GH_PROMPT_DISABLED", "1")
         .env("NO_COLOR", "1")
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(GH_TIMEOUT_SECS), child)
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let run = async {
+        let mut child = command.spawn().map_err(|error| format!("could not run gh: {error}"))?;
+        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+            stdin.write_all(input.as_bytes()).await.map_err(|error| format!("could not write to gh: {error}"))?;
+        }
+        child.wait_with_output().await.map_err(|error| format!("could not run gh: {error}"))
+    };
+    let output = tokio::time::timeout(std::time::Duration::from_secs(GH_TIMEOUT_SECS), run)
         .await
-        .map_err(|_| format!("gh timed out after {GH_TIMEOUT_SECS}s"))?
-        .map_err(|error| format!("could not run gh: {error}"))?;
+        .map_err(|_| format!("gh timed out after {GH_TIMEOUT_SECS}s"))??;
     if output.status.success() {
         return String::from_utf8(output.stdout).map_err(|error| error.to_string());
     }
@@ -267,7 +286,7 @@ async fn pulls(ids: Vec<String>) -> Result<String, String> {
 async fn conversation(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
-    let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 50) { totalCount nodes { id bodyHTML createdAt url author { login avatarUrl __typename } } } reviews(last: 30) { totalCount nodes { id state bodyHTML submittedAt url author { login avatarUrl __typename } comments { totalCount } } } reviewThreads(first: 100) { nodes { id isResolved isOutdated path line startLine originalLine diffSide comments(first: 50) { nodes { id databaseId bodyHTML createdAt url diffHunk author { login avatarUrl __typename } pullRequestReview { id } } } } } } } }";
+    let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 50) { totalCount nodes { id bodyHTML createdAt url author { login avatarUrl __typename } } } reviews(last: 30) { totalCount nodes { id state bodyHTML submittedAt url author { login avatarUrl __typename } comments { totalCount } } } reviewThreads(first: 100) { THREAD_PAGE } } } }".replace("THREAD_PAGE", THREAD_PAGE);
     gh(&[
         "api", "graphql",
         "-f", &format!("query={query}"),
@@ -415,6 +434,90 @@ async fn reply_comment(repo: String, number: u64, comment_id: u64, body: String)
     check_comment_body(&body)?;
     let endpoint = format!("repos/{repo}/pulls/{number}/comments/{comment_id}/replies");
     gh(&["api", &endpoint, "-X", "POST", "-f", &format!("body={body}"), "--jq", ".html_url"]).await.map(|url| url.trim().to_string())
+}
+
+/// The review threads after `after`, for pull requests with more than one page of them.
+#[tauri::command]
+async fn review_threads(repo: String, number: u64, after: String) -> Result<String, String> {
+    validate_repo(&repo)?;
+    if !is_node_id(&after) && !after.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '=' | ':')) {
+        return Err("invalid cursor".to_string());
+    }
+    let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
+    let query = "query($owner: String!, $name: String!, $number: Int!, $after: String!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) { THREAD_PAGE } } } }".replace("THREAD_PAGE", THREAD_PAGE);
+    gh(&[
+        "api", "graphql",
+        "-f", &format!("query={query}"),
+        "-F", &format!("owner={owner}"),
+        "-F", &format!("name={name}"),
+        "-F", &format!("number={number}"),
+        "-f", &format!("after={after}"),
+    ])
+    .await
+}
+
+#[tauri::command]
+async fn resolve_thread(thread_id: String, resolved: bool) -> Result<String, String> {
+    if !is_node_id(&thread_id) {
+        return Err("invalid thread".to_string());
+    }
+    let mutation = if resolved { "resolveReviewThread" } else { "unresolveReviewThread" };
+    let query = format!("mutation($id: ID!) {{ {mutation}(input: {{ threadId: $id }}) {{ thread {{ id isResolved }} }} }}");
+    gh(&["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("id={thread_id}")]).await
+}
+
+#[derive(Deserialize, Serialize)]
+struct ReviewComment {
+    path: String,
+    line: u64,
+    side: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_line: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_side: Option<String>,
+    body: String,
+}
+
+#[derive(Serialize)]
+struct ReviewPayload<'a> {
+    commit_id: &'a str,
+    event: &'a str,
+    body: &'a str,
+    comments: &'a [ReviewComment],
+}
+
+const MAX_REVIEW_COMMENTS: usize = 200;
+
+/// A whole review in one go: the summary, the verdict and the comments that were pending in the app.
+#[tauri::command]
+async fn submit_review(repo: String, number: u64, commit: String, event: String, body: String, comments: Vec<ReviewComment>) -> Result<String, String> {
+    validate_repo(&repo)?;
+    if !is_commit_sha(&commit) {
+        return Err(format!("invalid commit: {commit}"));
+    }
+    let event = match event.as_str() {
+        "COMMENT" => "COMMENT",
+        "APPROVE" => "APPROVE",
+        "REQUEST_CHANGES" => "REQUEST_CHANGES",
+        _ => return Err(format!("invalid review event: {event}")),
+    };
+    if body.len() > MAX_COMMENT_BYTES || comments.len() > MAX_REVIEW_COMMENTS {
+        return Err("review is too long".to_string());
+    }
+    if event != "APPROVE" && body.trim().is_empty() && comments.is_empty() {
+        return Err("write a summary or add comments first".to_string());
+    }
+    for comment in &comments {
+        check_comment_body(&comment.body)?;
+        contents_path(&comment.path)?;
+        diff_side(&comment.side)?;
+        if let Some(side) = &comment.start_side {
+            diff_side(side)?;
+        }
+    }
+    let payload = serde_json::to_string(&ReviewPayload { commit_id: &commit, event, body: &body, comments: &comments }).map_err(|error| error.to_string())?;
+    let endpoint = format!("repos/{repo}/pulls/{number}/reviews");
+    gh_with_input(&["api", &endpoint, "-X", "POST", "--input", "-", "--jq", ".html_url"], Some(&payload)).await.map(|url| url.trim().to_string())
 }
 
 #[tauri::command]
@@ -597,7 +700,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, merged, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, file_at, line_comment, reply_comment, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, merged, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, file_at, line_comment, reply_comment, review_threads, resolve_thread, submit_review, approve, merge, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }

@@ -49,6 +49,32 @@ export interface Conversation {
   threads: ReviewThread[];
 }
 
+interface ThreadPage {
+  pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+  nodes: RawThread[];
+}
+
+interface ThreadPageResponse {
+  data?: { repository: { pullRequest: { reviewThreads: ThreadPage } | null } | null };
+  errors?: { message: string }[];
+}
+
+/** More than this many pages of 100 threads is not a pull request anyone reviews here. */
+const MAX_THREAD_PAGES = 20;
+
+/** Threads past the first page, fetched one page at a time. */
+async function remainingThreads(pull: PullRequest, first: ThreadPage | undefined): Promise<RawThread[]> {
+  const threads = [...(first?.nodes ?? [])];
+  let page = first;
+  for (let count = 1; page?.pageInfo?.hasNextPage === true && page.pageInfo.endCursor != null && count < MAX_THREAD_PAGES; count++) {
+    const response: ThreadPageResponse = JSON.parse(await invoke<string>('review_threads', { repo: pull.repository.nameWithOwner, number: pull.number, after: page.pageInfo.endCursor }));
+    page = response.data?.repository?.pullRequest?.reviewThreads;
+    if (page == null) throw new Error(response.errors?.[0]?.message ?? 'Review threads unavailable');
+    threads.push(...page.nodes);
+  }
+  return threads;
+}
+
 interface RawReview {
   id: string;
   state: string;
@@ -94,7 +120,7 @@ interface Response {
       pullRequest: {
         comments: { totalCount: number; nodes: { id: string; bodyHTML: string; createdAt: string; url: string; author: Author | null }[] };
         reviews: { totalCount: number; nodes: RawReview[] };
-        reviewThreads?: { nodes: RawThread[] };
+        reviewThreads?: ThreadPage;
       } | null;
     } | null;
   };
@@ -140,7 +166,7 @@ async function fetchConversation(pull: PullRequest): Promise<Conversation> {
     inlineCount: 0,
     threads: [],
   }));
-  const rawThreads = (pr.reviewThreads?.nodes ?? []).filter((thread) => thread.comments.nodes.length > 0);
+  const rawThreads = (await remainingThreads(pull, pr.reviewThreads)).filter((thread) => thread.comments.nodes.length > 0);
   const threads = rawThreads.map(toThread);
   const startedBy = new Map<string, ReviewThread[]>();
   rawThreads.forEach((raw, index) => {

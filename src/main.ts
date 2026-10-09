@@ -8,10 +8,10 @@ import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, de
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, commentOnLines, commentOnPull, replyToThread, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
+import { approvePull, commentOnLines, commentOnPull, replyToThread, resolveThread, submitReview, type ReviewCommentInput, type ReviewEvent, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
 import type { SelectedLineRange } from '@pierre/diffs';
 import { DiffView, parseDiff, type AnnotationRef, type DiffAnnotation, type DiffStyle, type ExpandLines, type ParsedFile } from './diffs';
-import { composerHtml, threadHtml } from './inline-comments';
+import { composerHtml, pendingHtml, replyRowHtml, threadHtml } from './inline-comments';
 import { hasHiddenLines } from './hidden-lines';
 import { cancelFullFilePrefetch, fullFile, prefetchFullFiles } from './full-files';
 import { sanitizeHtml } from './sanitize';
@@ -105,6 +105,13 @@ const dom = {
   bulkApprove: element<HTMLButtonElement>('bulk-approve'),
   commentDialog: element<HTMLDialogElement>('comment-dialog'),
   expandDialog: element<HTMLDialogElement>('expand-dialog'),
+  reviewDialog: element<HTMLDialogElement>('review-dialog'),
+  reviewBody: element<HTMLTextAreaElement>('review-body'),
+  reviewNote: element('review-note'),
+  reviewSubmit: element<HTMLButtonElement>('review-submit'),
+  reviewBar: element('review-bar'),
+  reviewBarCount: element('review-bar-count'),
+  reviewDiscard: element<HTMLButtonElement>('review-discard'),
   expandInput: element<HTMLInputElement>('expand-input'),
   commentTitle: element('comment-title'),
   commentBody: element<HTMLTextAreaElement>('comment-body'),
@@ -1316,9 +1323,176 @@ interface LineDraft {
   line: number;
   startLine: number | null;
   startSide: 'additions' | 'deletions';
+  /** What the box opens with, when a pending comment goes back to being edited. */
+  text?: string;
 }
 
 const lineDrafts = new Map<string, LineDraft>();
+
+// --- The pending review: comments kept here until "Finish review" publishes them together ---
+
+interface PendingComment {
+  id: string;
+  path: string;
+  side: 'additions' | 'deletions';
+  line: number;
+  startLine: number | null;
+  startSide: 'additions' | 'deletions';
+  body: string;
+}
+
+/** Comments are tied to the commit they were written on, as GitHub's pending reviews are. */
+interface PendingReview {
+  commit: string;
+  comments: PendingComment[];
+}
+
+const PENDING_REVIEWS_KEY = 'pendingReviews';
+
+function storedPendingReviews(): Record<string, PendingReview> {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(PENDING_REVIEWS_KEY) ?? '{}');
+    return stored != null && typeof stored === 'object' ? (stored as Record<string, PendingReview>) : {};
+  } catch {
+    return {};
+  }
+}
+
+let pendingReviews = storedPendingReviews();
+
+function savePendingReviews(): void {
+  try {
+    localStorage.setItem(PENDING_REVIEWS_KEY, JSON.stringify(pendingReviews));
+  } catch {
+    toast('Could not save the pending review on this Mac', true);
+  }
+}
+
+function pendingComments(pull: PullRequest): PendingComment[] {
+  return pendingReviews[pull.id]?.comments ?? [];
+}
+
+function setPendingComments(pull: PullRequest, comments: PendingComment[]): void {
+  if (comments.length === 0) delete pendingReviews[pull.id];
+  else pendingReviews[pull.id] = { commit: pendingReviews[pull.id]?.commit ?? pull.headRefOid, comments };
+  savePendingReviews();
+  syncAnnotations(pull);
+}
+
+let discardArmedUntil = 0;
+
+/** The bar over the diff while a review is pending; Discard asks twice so a stray click loses nothing. */
+function syncReviewBar(pull: PullRequest | undefined): void {
+  const count = pull == null ? 0 : pendingComments(pull).length;
+  dom.reviewBar.hidden = count === 0;
+  dom.reviewBarCount.textContent = `${count} pending comment${count === 1 ? '' : 's'}`;
+  discardArmedUntil = 0;
+  dom.reviewDiscard.textContent = 'Discard';
+  const reviewLabel = count === 0 ? 'Start review' : 'Add to review';
+  document.querySelectorAll<HTMLButtonElement>('[data-composer-review]').forEach((button) => {
+    button.textContent = reviewLabel;
+    button.dataset.tip = `${reviewLabel}  ⇧⌘↵`;
+  });
+}
+
+function toSide(side: PendingComment['side']): 'LEFT' | 'RIGHT' {
+  return side === 'deletions' ? 'LEFT' : 'RIGHT';
+}
+
+function addToReview(composer: HTMLElement): void {
+  const pull = selectedPull();
+  const draftKey = composer.closest<HTMLElement>('.diff-annotation[data-draft]')?.dataset.draft;
+  const draft = draftKey == null ? undefined : lineDrafts.get(draftKey);
+  const body = composer.querySelector<HTMLTextAreaElement>('textarea')?.value.trim() ?? '';
+  if (pull == null || draft == null || body === '') return;
+  const comments = [...pendingComments(pull), { id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, path: draft.path, side: draft.side, line: draft.line, startLine: draft.startLine, startSide: draft.startSide, body }];
+  dropDraft(draft.key);
+  setPendingComments(pull, comments);
+  toast(`Added to your review · ${comments.length} pending`);
+}
+
+/** Edit turns a pending comment back into a draft on the same lines, holding its text. */
+function editPending(id: string): void {
+  const pull = selectedPull();
+  const comment = pull == null ? undefined : pendingComments(pull).find((candidate) => candidate.id === id);
+  if (pull == null || comment == null) return;
+  const key = `draft:${pull.id}:${comment.path}:${comment.side}:${comment.line}`;
+  lineDrafts.set(key, { key, pullId: pull.id, path: comment.path, side: comment.side, line: comment.line, startLine: comment.startLine, startSide: comment.startSide, text: comment.body });
+  annotationElements.delete(key);
+  setPendingComments(pull, pendingComments(pull).filter((candidate) => candidate.id !== id));
+  focusComposer(annotationElements.get(key));
+}
+
+function deletePending(id: string): void {
+  const pull = selectedPull();
+  if (pull != null) setPendingComments(pull, pendingComments(pull).filter((candidate) => candidate.id !== id));
+}
+
+function openReviewDialog(): void {
+  const pull = selectedPull();
+  if (pull == null || dom.reviewDialog.open) return;
+  const count = pendingComments(pull).length;
+  const canApprove = !isOwnPull(pull) && pull.mergedAt == null;
+  const approve = dom.reviewDialog.querySelector<HTMLInputElement>('input[value="APPROVE"]');
+  if (approve != null) approve.disabled = !canApprove;
+  element('review-approve-note').textContent = canApprove ? 'Ready to merge from your side' : isOwnPull(pull) ? 'You can’t approve your own pull request' : 'Already merged';
+  const comment = dom.reviewDialog.querySelector<HTMLInputElement>('input[value="COMMENT"]');
+  if (comment != null) comment.checked = true;
+  dom.reviewNote.textContent = count === 0 ? 'No pending comments: the summary goes out on its own.' : `${count} pending comment${count === 1 ? '' : 's'} will be published with it.`;
+  dom.reviewSubmit.disabled = false;
+  dom.reviewDialog.showModal();
+  dom.reviewBody.focus();
+}
+
+async function sendReview(): Promise<void> {
+  const pull = selectedPull();
+  if (pull == null || dom.reviewSubmit.disabled) return;
+  const event = (dom.reviewDialog.querySelector<HTMLInputElement>('input[name="review-event"]:checked')?.value ?? 'COMMENT') as ReviewEvent;
+  const body = dom.reviewBody.value.trim();
+  const pending = pendingReviews[pull.id];
+  const comments = (pending?.comments ?? []).map((comment): ReviewCommentInput => ({
+    path: comment.path,
+    line: comment.line,
+    side: toSide(comment.side),
+    ...(comment.startLine == null ? {} : { start_line: comment.startLine, start_side: toSide(comment.startSide) }),
+    body: comment.body,
+  }));
+  if (event !== 'APPROVE' && body === '' && comments.length === 0) {
+    toast('Write a summary, or add comments to the review first', true);
+    return;
+  }
+  dom.reviewSubmit.disabled = true;
+  try {
+    await submitReview(pull, pending?.commit ?? pull.headRefOid, event, body, comments);
+    delete pendingReviews[pull.id];
+    savePendingReviews();
+    dom.reviewBody.value = '';
+    dom.reviewDialog.close();
+    syncAnnotations(pull);
+    toast(event === 'APPROVE' ? `Approved #${pull.number}` : event === 'REQUEST_CHANGES' ? `Requested changes on #${pull.number}` : `Review sent on #${pull.number}`);
+    followUp([pull.id]);
+    refreshConversation(pull);
+  } catch (error) {
+    toast(codeCommentError(error), true);
+    dom.reviewSubmit.disabled = false;
+  }
+}
+
+async function toggleResolved(button: HTMLButtonElement): Promise<void> {
+  const pull = selectedPull();
+  const threadId = button.dataset.resolveThread;
+  if (pull == null || threadId == null || button.disabled) return;
+  const resolve = button.dataset.resolved !== 'true';
+  button.disabled = true;
+  try {
+    await resolveThread(threadId, resolve);
+    toast(resolve ? 'Resolved' : 'Unresolved');
+    refreshConversation(pull);
+  } catch (error) {
+    toast(errorMessage(error), true);
+    button.disabled = false;
+  }
+}
 const annotationRefs = new Map<string, AnnotationRef>();
 const annotationElements = new Map<string, HTMLElement>();
 let shownThreads: { pullId: string; threads: ReviewThread[] } = { pullId: '', threads: [] };
@@ -1352,10 +1526,12 @@ function syncAnnotations(pull: PullRequest): void {
   threads.forEach((thread) => {
     if (thread.line != null && !thread.isOutdated) add(thread.path, { side: thread.side, lineNumber: thread.line, metadata: annotationRef(threadKey(thread)) });
   });
+  pendingComments(pull).forEach((comment) => add(comment.path, { side: comment.side, lineNumber: comment.line, metadata: annotationRef(`pending:${comment.id}`) }));
   lineDrafts.forEach((draft) => {
     if (draft.pullId === pull.id) add(draft.path, { side: draft.side, lineNumber: draft.line, metadata: annotationRef(draft.key) });
   });
   diffView.setAnnotations(byPath);
+  syncReviewBar(pull);
 }
 
 function draftLabel(draft: LineDraft): string {
@@ -1386,10 +1562,17 @@ function renderAnnotation(ref: AnnotationRef): HTMLElement | undefined {
   const element = document.createElement('div');
   element.className = 'diff-annotation';
   const draft = lineDrafts.get(ref.key);
+  const pull = selectedPull();
   if (draft != null) {
     element.dataset.draft = draft.key;
-    element.innerHTML = composerHtml(draftLabel(draft), 'Comment');
+    element.innerHTML = composerHtml(draftLabel(draft), 'Comment', pull != null && pendingComments(pull).length > 0 ? 'Add to review' : 'Start review');
+    const textarea = element.querySelector('textarea');
+    if (textarea != null && draft.text != null) textarea.value = draft.text;
     focusComposer(element);
+  } else if (ref.key.startsWith('pending:')) {
+    const comment = pull == null ? undefined : pendingComments(pull).find((candidate) => `pending:${candidate.id}` === ref.key);
+    if (comment == null) return undefined;
+    element.innerHTML = pendingHtml(comment);
   } else {
     const thread = shownThreads.threads.find((candidate) => threadKey(candidate) === ref.key);
     if (thread == null) return undefined;
@@ -1418,7 +1601,8 @@ function closeReply(composer: HTMLElement): void {
   const reply = composer.closest<HTMLElement>('.thread-reply');
   const thread = composer.closest<HTMLElement>('[data-thread]');
   if (reply == null || thread == null) return;
-  reply.innerHTML = `<button type="button" class="thread-reply-open" data-reply-thread="${escapeHtml(thread.dataset.thread ?? '')}">Reply…</button>`;
+  const id = thread.dataset.thread ?? '';
+  reply.innerHTML = replyRowHtml({ id, isResolved: shownThreads.threads.find((candidate) => candidate.id === id)?.isResolved ?? false });
 }
 
 function cancelComposer(composer: HTMLElement): void {
@@ -1459,6 +1643,14 @@ async function submitComposer(composer: HTMLElement): Promise<void> {
 
 document.addEventListener('click', (event) => {
   const target = event.target as HTMLElement;
+  const resolve = target.closest<HTMLButtonElement>('[data-resolve-thread]');
+  if (resolve != null) {
+    void toggleResolved(resolve);
+    return;
+  }
+  const pending = target.closest<HTMLElement>('[data-pending]')?.dataset.pending;
+  if (pending != null && target.closest('[data-pending-edit]') != null) return editPending(pending);
+  if (pending != null && target.closest('[data-pending-delete]') != null) return deletePending(pending);
   const open = target.closest<HTMLElement>('[data-reply-thread]');
   if (open != null) {
     const reply = open.closest<HTMLElement>('.thread-reply');
@@ -1470,7 +1662,29 @@ document.addEventListener('click', (event) => {
   const composer = target.closest<HTMLElement>('.inline-composer');
   if (composer == null) return;
   if (target.closest('[data-composer-cancel]') != null) cancelComposer(composer);
+  else if (target.closest('[data-composer-review]') != null) addToReview(composer);
   else if (target.closest('[data-composer-submit]') != null) void submitComposer(composer);
+});
+
+element('review-finish').addEventListener('click', openReviewDialog);
+element('review-cancel').addEventListener('click', () => dom.reviewDialog.close());
+dom.reviewSubmit.addEventListener('click', () => void sendReview());
+dom.reviewDialog.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && event.metaKey) {
+    event.preventDefault();
+    void sendReview();
+  }
+});
+dom.reviewDiscard.addEventListener('click', () => {
+  const pull = selectedPull();
+  if (pull == null) return;
+  if (Date.now() > discardArmedUntil) {
+    discardArmedUntil = Date.now() + 3000;
+    dom.reviewDiscard.textContent = `Discard ${pendingComments(pull).length}?`;
+    return;
+  }
+  setPendingComments(pull, []);
+  toast('Pending review discarded');
 });
 
 /** The open PR changed without new code: its header and conversation update in place, and the diff keeps its scroll. */
@@ -3015,6 +3229,7 @@ const COMMANDS: Command[] = [
 
   { id: 'comment', section: 'Pull request', title: 'Write a comment', aliases: 'reply message mention note', keys: ['c'], run: openCommentDialog, isEnabled: hasPull },
   { id: 'approve', section: 'Pull request', title: 'Approve', aliases: 'lgtm review accept', keys: ['a'], run: () => void approveSelected(), isEnabled: () => { const pull = selectedPull(); return pull != null && !isOwnPull(pull); } },
+  { id: 'finish-review', section: 'Pull request', title: 'Finish review: publish pending comments with Comment, Approve or Request changes', aliases: 'submit review pending verdict request changes', keys: ['⌘⇧↵'], run: openReviewDialog, isEnabled: hasPull },
   { id: 'merge', section: 'Pull request', title: 'Merge (all selected when several are checked)', aliases: 'squash ship land queue', keys: ['⌘↵', 'm'], run: () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()), isEnabled: () => hasPull() || state.checkedIds.size > 0 },
   { id: 'fix-prompt', section: 'Pull request', title: 'Needs attention → copy agent prompt', aliases: 'triage unapproved broken red failing ci conflict agent claude codex prompt clipboard review', keys: ['⇧x'], run: openTriage },
   { id: 'open', section: 'Pull request', title: 'Open on GitHub', aliases: 'browser link url web', keys: ['o', '⌘o', 'g o'], run: openSelectedOnGitHub, isEnabled: hasPull },
@@ -3054,11 +3269,14 @@ function handleSequence(event: KeyboardEvent): boolean {
 }
 
 document.addEventListener('keydown', (event) => {
-  if ((event.isComposing && !event.altKey) || sliceMenu.isOpen || sortMenu.isOpen || labelMenu.isOpen || expandMenu.isOpen || dom.expandDialog.open || lightbox.isOpen || dom.confirm.open || dom.help.open || dom.bulkConfirm.open || dom.triage.open || themePicker.isOpen || dom.commentDialog.open) return;
+  if ((event.isComposing && !event.altKey) || sliceMenu.isOpen || sortMenu.isOpen || labelMenu.isOpen || expandMenu.isOpen || dom.expandDialog.open || dom.reviewDialog.open || lightbox.isOpen || dom.confirm.open || dom.help.open || dom.bulkConfirm.open || dom.triage.open || themePicker.isOpen || dom.commentDialog.open) return;
   const target = event.target;
   const composer = target instanceof HTMLTextAreaElement ? target.closest<HTMLElement>('.inline-composer') : null;
   if (composer != null && target instanceof HTMLTextAreaElement) {
-    if (event.key === 'Enter' && event.metaKey) {
+    if (event.key === 'Enter' && event.metaKey && event.shiftKey) {
+      event.preventDefault();
+      if (composer.querySelector('[data-composer-review]') != null) addToReview(composer);
+    } else if (event.key === 'Enter' && event.metaKey) {
       event.preventDefault();
       void submitComposer(composer);
     } else if (event.key === 'Escape') {

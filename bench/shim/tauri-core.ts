@@ -1,4 +1,4 @@
-import { DEMO_CONFLICTS, DEMO_PULLS, DEMO_TEAMS, DEMO_VIEWER, addDemoComment, addDemoReply, demoBody, demoConversation, demoDiff } from '../demo';
+import { DEMO_CONFLICTS, DEMO_PULLS, DEMO_TEAMS, DEMO_VIEWER, addDemoComment, addDemoReply, setDemoResolved, demoBody, demoConversation, demoDiff } from '../demo';
 import { generateBody, generateDiff, generatePulls, type FixturePull } from '../fixtures';
 import { parsePatchFiles } from '@pierre/diffs';
 
@@ -69,6 +69,14 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     return addDemoComment(String(args.path), Number(args.line), args.side === 'LEFT' ? 'LEFT' : 'RIGHT', args.startLine == null ? null : Number(args.startLine), String(args.body));
   },
   reply_comment: (args) => addDemoReply(Number(args.commentId), String(args.body)),
+  resolve_thread: (args) => setDemoResolved(String(args.threadId), args.resolved === true),
+  review_threads: () => JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } } }),
+  submit_review: (args) => {
+    const comments = args.comments as { path: string; line: number; side: string; start_line?: number; body: string }[];
+    comments.forEach((comment) => addDemoComment(comment.path, comment.line, comment.side === 'LEFT' ? 'LEFT' : 'RIGHT', comment.start_line ?? null, comment.body));
+    (window as unknown as { __reviews: unknown[] }).__reviews = [...((window as unknown as { __reviews?: unknown[] }).__reviews ?? []), { event: args.event, body: args.body, commit: args.commit, comments: comments.length }];
+    return 'https://github.com/acme/web/pull/4812#pullrequestreview-9';
+  },
   viewer: () => (IS_DEMO ? DEMO_VIEWER : 'someone-else'),
   viewer_teams: () => (IS_DEMO ? DEMO_TEAMS.join('\n') : ''),
   comment: (args) => `https://github.com/${String(args.repo)}/pull/${String(args.number)}#issuecomment-1`,

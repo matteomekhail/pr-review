@@ -260,6 +260,27 @@ export function commentOnLines(pull: PullRequest, target: LineTarget, body: stri
   return invoke<string>('line_comment', { repo: pull.repository.nameWithOwner, number: pull.number, commit: pull.headRefOid, path: target.path, line: target.line, side: target.side, startLine: target.startLine ?? null, startSide: target.startSide ?? null, body });
 }
 
+export function resolveThread(threadId: string, resolved: boolean): Promise<string> {
+  return invoke<string>('resolve_thread', { threadId, resolved });
+}
+
+export type ReviewEvent = 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES';
+
+/** A review comment as the reviews API takes it. */
+export interface ReviewCommentInput {
+  path: string;
+  line: number;
+  side: 'LEFT' | 'RIGHT';
+  start_line?: number;
+  start_side?: 'LEFT' | 'RIGHT';
+  body: string;
+}
+
+/** Publishes a whole review at once, against the commit its comments were written on. */
+export function submitReview(pull: PullRequest, commit: string, event: ReviewEvent, body: string, comments: readonly ReviewCommentInput[]): Promise<string> {
+  return invoke<string>('submit_review', { repo: pull.repository.nameWithOwner, number: pull.number, commit, event, body, comments });
+}
+
 export function replyToThread(pull: PullRequest, commentId: number, body: string): Promise<string> {
   return invoke<string>('reply_comment', { repo: pull.repository.nameWithOwner, number: pull.number, commentId, body });
 }

@@ -119,6 +119,29 @@
       </form>
     </dialog>
 
+    <dialog id="review-dialog">
+      <form method="dialog">
+        <div class="dialog-title">Finish your review</div>
+        <textarea id="review-body" rows="5" placeholder="Leave a summary… (markdown, @mentions work)" spellcheck="true"></textarea>
+        <div class="review-events" role="radiogroup" aria-label="Verdict">
+          <label><input type="radio" name="review-event" value="COMMENT" checked /><span><b>Comment</b><span class="muted">Feedback without approving</span></span></label>
+          <label id="review-approve-option"><input type="radio" name="review-event" value="APPROVE" /><span><b>Approve</b><span class="muted" id="review-approve-note">Ready to merge from your side</span></span></label>
+          <label><input type="radio" name="review-event" value="REQUEST_CHANGES" /><span><b>Request changes</b><span class="muted">Must be addressed before merging</span></span></label>
+        </div>
+        <div class="muted review-note" id="review-note"></div>
+        <menu>
+          <button type="button" class="ghost" id="review-cancel">Cancel <kbd>esc</kbd></button>
+          <button type="button" class="primary" id="review-submit">Submit review <kbd>⌘</kbd><kbd>↵</kbd></button>
+        </menu>
+      </form>
+    </dialog>
+
+    <div id="review-bar" class="review-bar" hidden role="status">
+      <span class="review-bar-count" id="review-bar-count"></span>
+      <button type="button" class="ghost" id="review-discard">Discard</button>
+      <button type="button" class="primary" id="review-finish" title="Finish review  ⇧⌘↵">Finish review</button>
+    </div>
+
     <dialog id="bulk-confirm">
       <form method="dialog">
         <div class="dialog-title" id="bulk-confirm-title"></div>

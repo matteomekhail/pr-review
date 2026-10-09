@@ -28,6 +28,11 @@ function lineLabel(thread: ReviewThread): string {
   return line == null ? '' : `line ${line}`;
 }
 
+/** Under a thread: a box that opens a reply, and Resolve (or Unresolve once it is resolved). */
+export function replyRowHtml(thread: Pick<ReviewThread, 'id' | 'isResolved'>): string {
+  return `<button type="button" class="thread-reply-open" data-reply-thread="${escapeHtml(thread.id)}">Reply…</button><button type="button" class="ghost thread-resolve" data-resolve-thread="${escapeHtml(thread.id)}" data-resolved="${thread.isResolved}">${thread.isResolved ? 'Unresolve' : 'Resolve'}</button>`;
+}
+
 /**
  * A code thread: its comments in order and a reply box. In the conversation (`withContext`) it also names the file
  * and shows the last lines of code it is on; in the diff that code is right above it. Resolved threads start folded.
@@ -36,17 +41,29 @@ export function threadHtml(thread: ReviewThread, { withContext, ago }: { withCon
   const tags = [thread.isOutdated ? 'Outdated' : '', thread.isResolved ? 'Resolved' : ''].filter((tag) => tag !== '').map((tag) => `<span class="thread-tag">${tag}</span>`).join('');
   const line = lineLabel(thread);
   const head = withContext ? `<header class="thread-head"><code title="${escapeHtml(thread.path)}">${escapeHtml(thread.path)}</code>${line === '' ? '' : `<span>${line}</span>`}${tags}</header>${hunkHtml(thread.diffHunk)}` : '';
-  const body = `${head}<div class="thread-comments">${thread.comments.map((comment) => commentHtml(comment, ago)).join('')}</div><div class="thread-reply"><button type="button" class="thread-reply-open" data-reply-thread="${escapeHtml(thread.id)}">Reply…</button></div>`;
+  const body = `${head}<div class="thread-comments">${thread.comments.map((comment) => commentHtml(comment, ago)).join('')}</div><div class="thread-reply">${replyRowHtml(thread)}</div>`;
   if (!thread.isResolved) return `<section class="thread" data-thread="${escapeHtml(thread.id)}">${body}</section>`;
   const count = `${thread.comments.length} comment${thread.comments.length === 1 ? '' : 's'}`;
   const where = withContext ? `${escapeHtml(thread.path.split('/').pop() ?? thread.path)}${line === '' ? '' : ` · ${line}`} · ` : '';
-  return `<details class="thread is-resolved" data-thread="${escapeHtml(thread.id)}"><summary><span class="thread-tag">Resolved</span>${where}${count} · ${escapeHtml(thread.comments[0]?.author ?? '')}</summary>${body}</details>`;
+  return `<details class="thread is-resolved" data-thread="${escapeHtml(thread.id)}"><summary><span class="thread-tag">Resolved</span><span class="one-line">${where}${count} · ${escapeHtml(thread.comments[0]?.author ?? '')}</span></summary>${body}</details>`;
 }
 
-/** A comment box; `label` says where the comment goes. ⌘↵ sends it, Esc on an empty box drops it. */
-export function composerHtml(label: string, submitLabel: string): string {
+/**
+ * A comment box; `label` says where the comment goes. ⌘↵ sends it, Esc on an empty box drops it. With `reviewLabel`
+ * it can also join the pending review instead (⇧⌘↵), as GitHub's "Start a review" does.
+ */
+export function composerHtml(label: string, submitLabel: string, reviewLabel?: string): string {
+  const review = reviewLabel == null ? '' : `<button type="button" class="ghost" data-composer-review title="${escapeHtml(reviewLabel)}  ⇧⌘↵">${escapeHtml(reviewLabel)}</button>`;
   return `<div class="inline-composer">
     <textarea rows="3" placeholder="Leave a comment… (markdown, @mentions work)" spellcheck="true"></textarea>
-    <div class="composer-foot"><span class="muted">${escapeHtml(label)}</span><button type="button" class="ghost" data-composer-cancel>Cancel <kbd>esc</kbd></button><button type="button" class="primary" data-composer-submit>${escapeHtml(submitLabel)} <kbd>⌘</kbd><kbd>↵</kbd></button></div>
+    <div class="composer-foot"><span class="muted">${escapeHtml(label)}</span><button type="button" class="ghost" data-composer-cancel title="Cancel  esc">Cancel</button>${review}<button type="button" class="primary" data-composer-submit title="Publish now  ⌘↵">${escapeHtml(submitLabel)} <kbd>⌘</kbd><kbd>↵</kbd></button></div>
   </div>`;
+}
+
+/** A comment waiting in the pending review, under its line: only here until the review is finished, like GitHub's pending comments. */
+export function pendingHtml(pending: { id: string; body: string }): string {
+  return `<section class="thread is-pending" data-pending="${escapeHtml(pending.id)}"><div class="thread-comment">
+    <header><span class="thread-tag">Pending</span><span class="pending-actions"><button type="button" class="link-button" data-pending-edit>Edit</button><button type="button" class="link-button" data-pending-delete>Delete</button></span></header>
+    <div class="thread-body pending-body">${escapeHtml(pending.body)}</div>
+  </div></section>`;
 }
