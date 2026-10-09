@@ -469,10 +469,16 @@ function mergedAuthorLabel(author: string): string {
   return author === '' ? 'Everyone' : author === '@me' ? 'Me' : author;
 }
 
+/** The label filter has its own button, but the selector names it too: it narrows the count beside it, in every tab. */
+function labelFilterLabel(): string {
+  if (state.labelFilter.length === 0) return '';
+  return state.labelFilter.length === 1 ? (state.labelFilter[0] ?? '') : `${state.labelFilter.length} labels`;
+}
+
 /** The selector names the filters in effect, or All; on Merged, the period and author. The repository goes last, so a long name is what gets cut. */
 function sliceLabel(): string {
-  if (state.kind === 'merged') return `${MERGED_PERIODS[state.mergedPeriod]} · ${mergedAuthorLabel(state.mergedAuthor)}`;
-  const parts = [hasAskScope(state.kind) && state.askScope !== 'all' ? ASK_LABELS[state.askScope] : '', state.smartFilter === 'all' ? '' : SMART_LABELS[state.smartFilter], state.repoFilter === '' ? '' : (state.repoFilter.split('/')[1] ?? state.repoFilter)];
+  if (state.kind === 'merged') return [MERGED_PERIODS[state.mergedPeriod], mergedAuthorLabel(state.mergedAuthor), labelFilterLabel()].filter((part) => part !== '').join(' · ');
+  const parts = [hasAskScope(state.kind) && state.askScope !== 'all' ? ASK_LABELS[state.askScope] : '', state.smartFilter === 'all' ? '' : SMART_LABELS[state.smartFilter], labelFilterLabel(), state.repoFilter === '' ? '' : (state.repoFilter.split('/')[1] ?? state.repoFilter)];
   return parts.filter((part) => part !== '').join(' · ') || 'All';
 }
 
@@ -520,17 +526,18 @@ function showSection(): MenuSection {
   return { title: 'Show', items: (Object.keys(SMART_LABELS) as SmartFilter[]).map((filter) => ({ label: SMART_LABELS[filter], count: String(counts[filter]), hint: SMART_KEYS[filter], checked: state.smartFilter === filter, run: () => setSmartFilter(filter, false) })) };
 }
 
-/** Repositories in the current tab, busiest first; the chosen one stays listed even when it has no PRs here. */
+/** Repositories in the current tab, busiest first, counted within the label filter like every other section; the chosen one stays listed even when it has no PRs here. */
 function repoSection(): MenuSection {
   const counts = new Map<string, number>();
-  state.pulls.forEach((pull) => counts.set(pull.repository.nameWithOwner, (counts.get(pull.repository.nameWithOwner) ?? 0) + 1));
+  const pulls = state.pulls.filter(matchesLabel);
+  pulls.forEach((pull) => counts.set(pull.repository.nameWithOwner, (counts.get(pull.repository.nameWithOwner) ?? 0) + 1));
   if (state.repoFilter !== '' && !counts.has(state.repoFilter)) counts.set(state.repoFilter, 0);
   const repos = [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
   const shortNames = repos.map(([repo]) => repo.split('/')[1] ?? repo);
   const label = (repo: string, index: number): string => (shortNames.filter((name) => name === shortNames[index]).length > 1 ? repo : (shortNames[index] ?? repo));
   return {
     title: 'Repository',
-    items: [{ label: 'All repos', count: String(state.pulls.length), checked: state.repoFilter === '', run: () => setRepoFilter('') }, ...repos.map(([repo, count], index) => ({ label: label(repo, index), count: String(count), checked: state.repoFilter === repo, run: () => setRepoFilter(repo) }))],
+    items: [{ label: 'All repos', count: String(pulls.length), checked: state.repoFilter === '', run: () => setRepoFilter('') }, ...repos.map(([repo, count], index) => ({ label: label(repo, index), count: String(count), checked: state.repoFilter === repo, run: () => setRepoFilter(repo) }))],
   };
 }
 
@@ -548,12 +555,23 @@ function labelSections(): MenuSection[] {
   ];
 }
 
+/**
+ * GitHub's count for each period searched so far. With a repository or label chosen it counts the PRs loaded for that
+ * period instead, so it matches the list; a "+" means GitHub stopped at 1,000 and there may be more.
+ */
 function periodSection(): MenuSection {
+  const isNarrowed = state.repoFilter !== '' || state.labelFilter.length > 0;
+  const count = (known: SearchResult | undefined): string | undefined => {
+    if (known == null) return undefined;
+    if (!isNarrowed) return String(known.total);
+    const matching = known.pulls.filter((pull) => matchesRepo(pull) && matchesLabel(pull)).length;
+    return known.total > known.pulls.length ? `${matching}+` : String(matching);
+  };
   return {
     title: 'Period',
     items: (Object.keys(MERGED_PERIODS) as MergedPeriod[]).map((period) => {
       const known = searches.get(`${MERGED_PREFIX}${period}:${state.mergedAuthor}`);
-      return { label: MERGED_PERIODS[period], count: known == null ? undefined : String(known.total), checked: state.mergedPeriod === period, run: () => setMergedFilter(period, state.mergedAuthor) };
+      return { label: MERGED_PERIODS[period], count: count(known), checked: state.mergedPeriod === period, run: () => setMergedFilter(period, state.mergedAuthor) };
     }),
   };
 }
