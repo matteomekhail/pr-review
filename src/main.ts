@@ -9,7 +9,7 @@ import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } f
 import { ThemePicker } from './theme-picker';
 import './styles.css';
 import { approvePull, commentOnPull, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
-import { DiffView, parseDiff, type DiffStyle, type ParsedFile } from './diffs';
+import { DiffView, EXPAND_LINES_CHOICES, parseDiff, type DiffStyle, type ExpandLines, type ParsedFile } from './diffs';
 import { hasHiddenLines } from './hidden-lines';
 import { cancelFullFilePrefetch, fullFile, prefetchFullFiles } from './full-files';
 import { sanitizeHtml } from './sanitize';
@@ -51,6 +51,7 @@ interface State {
   selectedId: string | null;
   activeFileIndex: number;
   diffStyle: DiffStyle;
+  expandLines: ExpandLines;
 }
 
 const PREFETCH_AHEAD = 5;
@@ -140,6 +141,7 @@ const state: State = {
   selectedId: null,
   activeFileIndex: 0,
   diffStyle: localStorage.getItem('diffStyle') === 'unified' ? 'unified' : 'split',
+  expandLines: EXPAND_LINES_CHOICES.find((choice) => String(choice) === localStorage.getItem('expandLines')) ?? 'all',
 };
 
 let viewer: string | null = null;
@@ -149,6 +151,7 @@ const diffCache = new Map<string, Promise<ParsedFile[]>>();
 const queueCache = new Map<QueueKind, PullRequest[]>();
 let isSelectedQueued = false;
 const diffView = new DiffView(dom.diffRoot, state.diffStyle, { onToggle: (id, isCollapsed) => markFileCollapsed(id, isCollapsed) });
+diffView.setExpandLines(state.expandLines);
 let currentFiles: ParsedFile[] = [];
 let renderToken = 0;
 let toastTimer: number | undefined;
@@ -2354,6 +2357,19 @@ async function mergeSelected(): Promise<void> {
   void refresh(state.kind);
 }
 
+function expandLinesLabel(choice: ExpandLines): string {
+  return choice === 'all' ? 'the whole gap' : `${choice} lines`;
+}
+
+/** Like the sort, one key steps through the choices and a toast names the one now in use. */
+function cycleExpandLines(): void {
+  const choice = EXPAND_LINES_CHOICES[(EXPAND_LINES_CHOICES.indexOf(state.expandLines) + 1) % EXPAND_LINES_CHOICES.length] ?? 'all';
+  state.expandLines = choice;
+  localStorage.setItem('expandLines', String(choice));
+  diffView.setExpandLines(choice);
+  toast(`Unmodified lines: a click shows ${expandLinesLabel(choice)}`);
+}
+
 function toggleStyle(): void {
   state.diffStyle = state.diffStyle === 'split' ? 'unified' : 'split';
   localStorage.setItem('diffStyle', state.diffStyle);
@@ -2730,6 +2746,7 @@ const COMMANDS: Command[] = [
   ...DIFF_SCROLL_COMMANDS,
   { id: 'toggle-file', section: 'Diff', title: 'Collapse / expand file', aliases: 'fold unfold hide', keys: ['x'], run: toggleCurrentFile, isEnabled: hasFiles },
   { id: 'toggle-bots', section: 'Pull request', title: 'Show / hide bot comments', aliases: 'bots perry github-actions automated comments conversation', keys: ['⇧b'], run: () => { showBotComments = !showBotComments; localStorage.setItem('showBotComments', showBotComments ? '1' : '0'); const pull = selectedPull(); if (pull != null) renderDetail(pull); toast(showBotComments ? 'Showing bot comments' : 'Hiding bot comments'); } },
+  { id: 'expand-lines', section: 'Diff', title: 'Unmodified lines per click: whole gap / 20 / 50 / 100 (shift-click opens it all)', aliases: 'expand context hidden unchanged separator github', keys: ['⇧e'], run: cycleExpandLines },
   { id: 'diff-style', section: 'Diff', title: 'Toggle split / unified diff', aliases: 'side by side inline view', keys: ['s', '⌘⌥s'], run: toggleStyle },
 
   { id: 'comment', section: 'Pull request', title: 'Write a comment', aliases: 'reply message mention note', keys: ['c'], run: openCommentDialog, isEnabled: hasPull },

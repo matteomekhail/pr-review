@@ -6,6 +6,11 @@ import { oldContents } from './hidden-lines';
 
 export type DiffStyle = 'split' | 'unified';
 
+/** How many unmodified lines one click on a separator reveals; `all` opens the whole gap. Shift-click always opens it all. */
+export type ExpandLines = 'all' | 20 | 50 | 100;
+
+export const EXPAND_LINES_CHOICES: readonly ExpandLines[] = ['all', 20, 50, 100];
+
 export interface ParsedFile {
   id: string;
   diff: FileDiffMetadata;
@@ -26,8 +31,6 @@ type ViewOptions = NonNullable<ConstructorParameters<typeof CodeView<undefined, 
 
 const WORKER_COUNT = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 2));
 const LARGE_FILE_LINES = 1500;
-/** One click on a separator reveals the whole gap: the file is already loaded, so GitHub's 20 lines at a time only costs clicks. */
-const EXPANSION_LINES = Number.POSITIVE_INFINITY;
 const GENERATED_FILE = /(^|\/)(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock)$|\.snap$|\.min\.(js|css)$/;
 
 const HEADER_CSS = `
@@ -81,6 +84,7 @@ export class DiffView {
   private themeType: 'dark' | 'light' = 'dark';
   private themeNames: Record<'dark' | 'light', string> = { dark: 'pierre-dark', light: 'pierre-light' };
   private diffStyle: DiffStyle;
+  private expandLines: ExpandLines = 'all';
   private collapsed = new Set<string>();
   private ids: string[] = [];
   private readonly headFiles = new WeakMap<FileDiffMetadata, HeadFileLoader>();
@@ -136,6 +140,12 @@ export class DiffView {
     this.view.setOptions(this.options());
   }
 
+  setExpandLines(expandLines: ExpandLines): void {
+    if (this.expandLines === expandLines) return;
+    this.expandLines = expandLines;
+    this.view.setOptions(this.options());
+  }
+
   scrollToTop(): void {
     this.view.scrollTo({ type: 'position', position: 0, behavior: 'instant' });
   }
@@ -188,7 +198,7 @@ export class DiffView {
       diffIndicators: 'bars',
       lineDiffType: 'word-alt',
       hunkSeparators: 'line-info',
-      expansionLineCount: EXPANSION_LINES,
+      expansionLineCount: this.expandLines === 'all' ? Number.POSITIVE_INFINITY : this.expandLines,
       loadDiffFiles: this.loadDiffFiles,
       overflow: 'scroll',
       stickyHeaders: true,
