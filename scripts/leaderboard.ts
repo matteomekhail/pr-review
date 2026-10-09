@@ -2,9 +2,17 @@
 //
 //   bun scripts/leaderboard.ts --org RelevanceAI --out <dir>
 //
-// Writes <dir>/leaderboard.json (a row per person and period) and <dir>/totals.json (a row per period). The last
-// 30 days of PRs are kept in a cache, so after the first run only PRs that changed since the last one are fetched.
-// Same rules as the app's Reviews tab: a review counts once per PR, bots and authors replying on their own PRs don't.
+// Writes <dir>/leaderboard.json (a row per person and period), <dir>/totals.json (a row per period) and <dir>/prs.json
+// (a row per PR with its complexity). The last 30 days of PRs are kept in a cache, so after the first run only PRs that
+// changed since the last one are fetched. Same rules as the app's Reviews tab: a review counts once per PR, bots and
+// authors replying on their own PRs don't.
+//
+// Complexity: Jev (TypeSafe's systemone API, the model behind the app's readiness score) rates each PR's breadth, logic
+// and review effort from 0 to 4 from its title, description and changed files; their sum maps onto 1 (trivial) to 10.
+// A PR is rated once per head commit and the ratings are cached. The key comes from TYPESAFE_API_KEY or the macOS
+// Keychain (service TYPESAFE_API_KEY), as in the app; without one, the counts still update and unrated PRs score
+// nothing. A person's points are the complexity of each PR they merged plus the complexity of each PR they reviewed.
+// The first run rates the whole month (about 1,600 PRs): pass --rating-budget-s 3600 to let it finish in one go.
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -14,7 +22,10 @@ const args = process.argv.slice(2);
 const option = (name: string, fallback: string): string => args.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3) ?? (args.includes(`--${name}`) ? (args[args.indexOf(`--${name}`) + 1] ?? fallback) : fallback);
 const ORG = option('org', 'RelevanceAI');
 const OUT = option('out', '.');
-const CACHE = join(homedir(), 'Library', 'Caches', 'pr-review-leaderboard', `${ORG}.json`);
+const CACHE_DIR = join(homedir(), 'Library', 'Caches', 'pr-review-leaderboard');
+const CACHE = join(CACHE_DIR, `${ORG}.v2.json`);
+const RATINGS = join(CACHE_DIR, `${ORG}.complexity.json`);
+const LOCK = join(CACHE_DIR, `${ORG}.rating.lock`);
 
 const DAY_MS = 86_400_000;
 const PAGE_SIZE = 50;
@@ -25,8 +36,17 @@ const CONCURRENCY = 8;
 const INDEX_LAG_MS = 10 * 60_000;
 /** A cache older than this is thrown away and the whole month fetched again. */
 const FULL_REFRESH_MS = 6 * 3_600_000;
+const SYSTEM_ONE_URL = 'https://api.typesafe.ai/v1/systemone';
+const RATING_CONCURRENCY = 6;
+/** A run stops rating after this long, so the first backfill spreads over several runs instead of holding one up. */
+const RATING_BUDGET_MS = Number(option('rating-budget-s', '600')) * 1_000;
+const CONTEXT_BATCH = 20;
+const MAX_BODY_CHARS = 4_000;
+const MAX_FILES = 60;
+/** Bumped when the question changes, so every PR is rated again on the new scale. */
+const RATING_VERSION = 3;
 
-const FIELDS = `... on PullRequest { id number url mergedAt closedAt repository { nameWithOwner } author { login __typename } reviews(last: 100) { nodes { submittedAt author { login __typename } } } }`;
+const FIELDS = `... on PullRequest { id number title url headRefOid mergedAt closedAt repository { nameWithOwner } author { login __typename } reviews(last: 100) { nodes { submittedAt author { login __typename } } } }`;
 
 interface Actor {
   login: string;
@@ -35,7 +55,9 @@ interface Actor {
 interface Pull {
   id: string;
   number: number;
+  title: string;
   url: string;
+  headRefOid: string;
   mergedAt: string | null;
   closedAt: string | null;
   repository: { nameWithOwner: string };
@@ -43,8 +65,8 @@ interface Pull {
   reviews: { nodes: { submittedAt: string | null; author: Actor | null }[] };
 }
 
-async function gh(query: string, variables: Record<string, string>): Promise<any> {
-  const flags = Object.entries(variables).flatMap(([key, value]) => ['-f', `${key}=${value}`]);
+async function gh(query: string, variables: Record<string, string>, ids: readonly string[] = []): Promise<any> {
+  const flags = [...Object.entries(variables).flatMap(([key, value]) => ['-f', `${key}=${value}`]), ...ids.flatMap((id) => ['-f', `ids[]=${id}`])];
   for (let attempt = 1; ; attempt += 1) {
     const child = Bun.spawn(['gh', 'api', 'graphql', '-f', `query=${query}`, ...flags], { stdout: 'pipe', stderr: 'pipe', env: { ...Bun.env, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' } });
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
@@ -56,10 +78,10 @@ async function gh(query: string, variables: Record<string, string>): Promise<any
 }
 
 /** Runs tasks with at most CONCURRENCY at a time. */
-async function pooled<T>(tasks: (() => Promise<T>)[]): Promise<T[]> {
+async function pooled<T>(tasks: (() => Promise<T>)[], limit = CONCURRENCY): Promise<T[]> {
   const results: T[] = new Array(tasks.length);
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, async () => {
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, async () => {
     for (let index = next++; index < tasks.length; index = next++) results[index] = await tasks[index]!();
   }));
   return results;
@@ -142,6 +164,135 @@ const pulls = [...merged.values()].filter((pull) => at(pull.mergedAt) >= monthAg
 mkdirSync(join(CACHE, '..'), { recursive: true });
 writeFileSync(CACHE, JSON.stringify({ fetchedAt: now, pulls }));
 
+// Complexity ratings: every kept PR, once per head commit.
+interface Rating {
+  v: number;
+  sha: string;
+  complexity: number;
+  confidence: number;
+  at: string;
+}
+let ratings: Record<string, Rating> = {};
+try {
+  ratings = JSON.parse(readFileSync(RATINGS, 'utf8'));
+} catch {
+  ratings = {};
+}
+
+const SIZE_NOTE = 'Size alone is not complexity: generated files, lockfiles, snapshots, renames, version bumps and mechanical refactors are simple even when large.';
+
+/** Three sides of complexity, each 0–4; a PR's complexity is their sum mapped onto 1–10. One question alone put most PRs on the same level. */
+const COMPLEXITY_QUESTIONS = {
+  breadth: {
+    type: 'score',
+    instructions: `Judging by the \`files\` and the \`pull_request\` description, how many distinct parts of the system does this pull request change in a meaningful way (packages, services, layers such as UI, API, database and infrastructure)? ${SIZE_NOTE}`,
+    criteria: ['Nothing meaningful: docs, config values or generated files only', 'One small area', 'One area in depth, or two areas lightly', 'Several areas or services that have to change together', 'Many areas across the system, or a cross-cutting change'],
+  },
+  logic: {
+    type: 'score',
+    instructions: `How hard is the logic this pull request adds or changes? Consider algorithms, state, data model and schema changes, concurrency, error handling and edge cases, as described in the \`pull_request\` body and implied by the \`files\`. ${SIZE_NOTE}`,
+    criteria: ['No real logic: text, styling, wiring or values', 'Straightforward logic with obvious behaviour', 'Some real logic with a few cases to get right', 'Intricate logic: state, data model changes or many edge cases', 'Hard logic: concurrency, migrations, distributed state or novel algorithms'],
+  },
+  review_effort: {
+    type: 'score',
+    instructions: 'How much careful reasoning does a reviewer need to be confident this pull request is correct and safe, given what it touches (security, permissions, money, data, infrastructure, contracts between services) and how easy its changes are to follow?',
+    criteria: ['A glance is enough', 'A quick read', 'A careful read of the main changes', 'Close study, possibly running it, with real risk if wrong', 'Deep study by someone who knows the system, high risk if wrong'],
+  },
+};
+
+async function typesafeKey(): Promise<string | null> {
+  const fromEnv = Bun.env.TYPESAFE_API_KEY?.trim();
+  if (fromEnv) return fromEnv;
+  const child = Bun.spawn(['security', 'find-generic-password', '-s', 'TYPESAFE_API_KEY', '-w'], { stdout: 'pipe', stderr: 'ignore' });
+  const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+  return code === 0 && stdout.trim() !== '' ? stdout.trim() : null;
+}
+
+interface Context {
+  id: string;
+  title: string;
+  body: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  files: { totalCount: number; nodes: { path: string; additions: number; deletions: number }[] } | null;
+}
+
+const clip = (text: string, limit: number): string => {
+  const trimmed = text.replace(/\n{3,}/g, '\n\n').trim();
+  return trimmed.length > limit ? `${trimmed.slice(0, limit)}…` : trimmed;
+};
+
+async function rate(key: string, context: Context): Promise<{ complexity: number; confidence: number }> {
+  const files = context.files?.nodes ?? [];
+  const state = {
+    pull_request: { title: context.title, body: clip(context.body ?? '', MAX_BODY_CHARS), lines_added: context.additions, lines_deleted: context.deletions, files_changed: context.changedFiles },
+    files: files.slice(0, MAX_FILES).map((file) => `${file.path} (+${file.additions} -${file.deletions})`),
+    files_not_listed: Math.max(0, (context.files?.totalCount ?? files.length) - Math.min(files.length, MAX_FILES)),
+  };
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const response = await fetch(SYSTEM_ONE_URL, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'jev-latest', state, questions: COMPLEXITY_QUESTIONS }), signal: AbortSignal.timeout(90_000) });
+      const body = (await response.json()) as { answers?: Record<string, { type: string; score: number; confidence: number }>; error?: { message?: string } };
+      const answers = Object.keys(COMPLEXITY_QUESTIONS).map((name) => body.answers?.[name]);
+      if (!response.ok || answers.some((answer) => answer?.type !== 'score')) throw new Error(body.error?.message ?? `HTTP ${response.status}`);
+      const sum = answers.reduce((total, answer) => total + Math.min(4, Math.max(0, answer!.score)), 0);
+      return { complexity: Math.round(1 + (sum / 12) * 9), confidence: Math.min(...answers.map((answer) => answer!.confidence)) };
+    } catch (error) {
+      if (attempt === 3 || String(error).includes('401') || String(error).toLowerCase().includes('unauthor')) throw error;
+      await Bun.sleep(3_000 * attempt);
+    }
+  }
+}
+
+const CONTEXT_QUERY = `query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest { id title body additions deletions changedFiles files(first: ${MAX_FILES}) { totalCount nodes { path additions deletions } } } } }`;
+
+/** Rates PRs without a rating for their current head, until the budget runs out; returns how many were rated and why it stopped early. */
+async function rateMissing(): Promise<string> {
+  const missing = pulls.filter((pull) => ratings[pull.id]?.v !== RATING_VERSION || (pull.headRefOid != null && ratings[pull.id]!.sha !== pull.headRefOid));
+  if (missing.length === 0) return 'all PRs rated';
+  const key = await typesafeKey();
+  if (key == null) return `${missing.length} PRs unrated: no TYPESAFE_API_KEY`;
+  try {
+    const lock = JSON.parse(readFileSync(LOCK, 'utf8')) as { at: number };
+    if (now - lock.at < 20 * 60_000) return `${missing.length} PRs unrated: another run is rating`;
+  } catch {
+    // no lock
+  }
+  writeFileSync(LOCK, JSON.stringify({ at: now }));
+  const deadline = performance.now() + RATING_BUDGET_MS;
+  let rated = 0;
+  let failure = '';
+  try {
+    const batches = Array.from({ length: Math.ceil(missing.length / CONTEXT_BATCH) }, (_, index) => missing.slice(index * CONTEXT_BATCH, (index + 1) * CONTEXT_BATCH));
+    for (const batch of batches) {
+      if (performance.now() > deadline || failure !== '') break;
+      const contexts = ((await gh(CONTEXT_QUERY, {}, batch.map((pull) => pull.id))).nodes as (Context | null)[]).filter((context): context is Context => context?.id != null);
+      const sha = new Map(batch.map((pull) => [pull.id, pull.headRefOid]));
+      await pooled(contexts.map((context) => async () => {
+        if (failure !== '') return;
+        try {
+          const result = await rate(key, context);
+          ratings[context.id] = { v: RATING_VERSION, sha: sha.get(context.id) ?? '', ...result, at: new Date().toISOString() };
+          rated += 1;
+        } catch (error) {
+          if (String(error).includes('401') || String(error).toLowerCase().includes('unauthor')) failure = 'the TypeSafe key was refused';
+        }
+      }), RATING_CONCURRENCY);
+      writeFileSync(RATINGS, JSON.stringify(ratings));
+    }
+  } finally {
+    writeFileSync(RATINGS, JSON.stringify(ratings));
+    writeFileSync(LOCK, JSON.stringify({ at: 0 }));
+  }
+  const left = pulls.filter((pull) => ratings[pull.id]?.v !== RATING_VERSION).length;
+  return `rated ${rated}${left > 0 ? `, ${left} still unrated${failure !== '' ? ` (${failure})` : ' (continues next run)'}` : ''}`;
+}
+
+const ratingSummary = args.includes('--no-rating') ? 'rating skipped' : await rateMissing();
+const ratingOf = (pull: Pull): Rating | undefined => (ratings[pull.id]?.v === RATING_VERSION ? ratings[pull.id] : undefined);
+const complexityOf = (pull: Pull): number => ratingOf(pull)?.complexity ?? 0;
+
 // Periods in local time; a week starts on Monday.
 const midnight = new Date(new Date(now).setHours(0, 0, 0, 0));
 const monday = new Date(midnight.getFullYear(), midnight.getMonth(), midnight.getDate() - ((midnight.getDay() + 6) % 7));
@@ -167,30 +318,50 @@ pulls.forEach((pull) => {
 const people: Record<string, string | number>[] = [];
 const totals: Record<string, string | number>[] = [];
 for (const { period, label, since } of PERIODS) {
-  const mergedBy = new Map([...roster].map((login) => [login, 0]));
-  const reviewedBy = new Map([...roster].map((login) => [login, 0]));
+  const zero = () => new Map([...roster].map((login) => [login, 0]));
+  const [mergedBy, reviewedBy, mergedPoints, reviewedPoints] = [zero(), zero(), zero(), zero()];
+  const add = (map: Map<string, number>, login: string, value: number) => map.set(login, (map.get(login) ?? 0) + value);
   let mergedPrs = 0;
   let reviewedPrs = 0;
   let reviews = 0;
+  let complexitySum = 0;
+  let rated = 0;
+  let unrated = 0;
   for (const pull of pulls) {
-    if (!isBot(pull.author) && at(pull.mergedAt) >= since) {
-      mergedPrs += 1;
-      mergedBy.set(pull.author!.login, (mergedBy.get(pull.author!.login) ?? 0) + 1);
-    }
+    const isMerged = !isBot(pull.author) && at(pull.mergedAt) >= since;
     const reviewers = reviewersSince(pull, since);
+    if (isMerged || reviewers.size > 0) {
+      if (ratingOf(pull) == null) unrated += 1;
+      else rated += 1;
+    }
+    if (isMerged) {
+      mergedPrs += 1;
+      add(mergedBy, pull.author!.login, 1);
+      add(mergedPoints, pull.author!.login, complexityOf(pull));
+      if (ratingOf(pull) != null) complexitySum += complexityOf(pull);
+    }
     if (reviewers.size > 0) reviewedPrs += 1;
     reviews += reviewsSince(pull, since);
-    reviewers.forEach((login) => reviewedBy.set(login, (reviewedBy.get(login) ?? 0) + 1));
+    reviewers.forEach((login) => {
+      add(reviewedBy, login, 1);
+      add(reviewedPoints, login, complexityOf(pull));
+    });
   }
   const combined = new Map([...roster].map((login) => [login, (mergedBy.get(login) ?? 0) + (reviewedBy.get(login) ?? 0)]));
-  const [mergedRank, reviewedRank, combinedRank] = [ranks(mergedBy), ranks(reviewedBy), ranks(combined)];
+  const points = new Map([...roster].map((login) => [login, (mergedPoints.get(login) ?? 0) + (reviewedPoints.get(login) ?? 0)]));
+  const [mergedRank, reviewedRank, combinedRank, pointsRank] = [ranks(mergedBy), ranks(reviewedBy), ranks(combined), ranks(points)];
+  const mergedRated = pulls.filter((pull) => !isBot(pull.author) && at(pull.mergedAt) >= since && ratingOf(pull) != null).length;
   [...roster]
-    .sort((left, right) => (combined.get(right) ?? 0) - (combined.get(left) ?? 0) || left.localeCompare(right))
-    .forEach((login) => people.push({ period, login, merged: mergedBy.get(login) ?? 0, reviewed: reviewedBy.get(login) ?? 0, combined: combined.get(login) ?? 0, merged_rank: mergedRank.get(login)!, reviewed_rank: reviewedRank.get(login)!, combined_rank: combinedRank.get(login)! }));
-  totals.push({ period, label, since: new Date(since).toISOString(), merged_prs: mergedPrs, reviewed_prs: reviewedPrs, reviews, active_people: [...combined.values()].filter((value) => value > 0).length, as_of: new Date(now).toISOString() });
+    .sort((left, right) => (points.get(right) ?? 0) - (points.get(left) ?? 0) || left.localeCompare(right))
+    .forEach((login) => people.push({ period, login, merged: mergedBy.get(login) ?? 0, reviewed: reviewedBy.get(login) ?? 0, combined: combined.get(login) ?? 0, merged_points: mergedPoints.get(login) ?? 0, reviewed_points: reviewedPoints.get(login) ?? 0, points: points.get(login) ?? 0, merged_rank: mergedRank.get(login)!, reviewed_rank: reviewedRank.get(login)!, combined_rank: combinedRank.get(login)!, points_rank: pointsRank.get(login)! }));
+  totals.push({ period, label, since: new Date(since).toISOString(), merged_prs: mergedPrs, reviewed_prs: reviewedPrs, reviews, active_people: [...combined.values()].filter((value) => value > 0).length, avg_complexity: mergedRated === 0 ? null : Math.round((complexitySum / mergedRated) * 10) / 10, rated_prs: rated, unrated_prs: unrated, as_of: new Date(now).toISOString() });
 }
 
 mkdirSync(OUT, { recursive: true });
 writeFileSync(join(OUT, 'leaderboard.json'), JSON.stringify(people));
 writeFileSync(join(OUT, 'totals.json'), JSON.stringify(totals));
-console.log(`${isDelta ? 'delta' : 'full'} fetch: ${fetched.length} PRs in ${((performance.now() - started) / 1000).toFixed(1)}s; ${pulls.length} kept, ${roster.size} people; wrote ${OUT}`);
+const prs = pulls
+  .map((pull) => ({ id: `${pull.repository.nameWithOwner}#${pull.number}`, repo: pull.repository.nameWithOwner.split('/')[1] ?? pull.repository.nameWithOwner, number: pull.number, title: pull.title ?? '', author: pull.author?.login ?? '', is_bot: isBot(pull.author), complexity: ratingOf(pull)?.complexity ?? null, merged_at: pull.mergedAt, last_review_at: pull.reviews.nodes.reduce<string | null>((latest, review) => (review.submittedAt != null && !isBot(review.author) && (latest == null || review.submittedAt > latest) ? review.submittedAt : latest), null), url: pull.url }))
+  .sort((left, right) => (right.complexity ?? 0) - (left.complexity ?? 0) || String(right.merged_at ?? '').localeCompare(String(left.merged_at ?? '')));
+writeFileSync(join(OUT, 'prs.json'), JSON.stringify(prs));
+console.log(`${isDelta ? 'delta' : 'full'} fetch: ${fetched.length} PRs in ${((performance.now() - started) / 1000).toFixed(1)}s; ${pulls.length} kept, ${roster.size} people; ${ratingSummary}; wrote ${OUT}`);
