@@ -107,6 +107,18 @@
       </form>
     </dialog>
 
+    <dialog id="expand-dialog">
+      <form method="dialog">
+        <div class="dialog-title">Lines per click</div>
+        <input id="expand-input" type="number" min="1" max="100000" step="1" inputmode="numeric" placeholder="40" autocomplete="off" required />
+        <div class="muted expand-hint">How many unmodified lines a click on a separator reveals. Shift-click still opens the whole gap.</div>
+        <menu>
+          <button type="button" class="ghost" id="expand-cancel">Cancel <kbd>esc</kbd></button>
+          <button value="ok" class="primary">Save <kbd>↵</kbd></button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="bulk-confirm">
       <form method="dialog">
         <div class="dialog-title" id="bulk-confirm-title"></div>

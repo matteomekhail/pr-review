@@ -9,7 +9,7 @@ import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } f
 import { ThemePicker } from './theme-picker';
 import './styles.css';
 import { approvePull, commentOnPull, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
-import { DiffView, EXPAND_LINES_CHOICES, parseDiff, type DiffStyle, type ExpandLines, type ParsedFile } from './diffs';
+import { DiffView, parseDiff, type DiffStyle, type ExpandLines, type ParsedFile } from './diffs';
 import { hasHiddenLines } from './hidden-lines';
 import { cancelFullFilePrefetch, fullFile, prefetchFullFiles } from './full-files';
 import { sanitizeHtml } from './sanitize';
@@ -102,6 +102,8 @@ const dom = {
   bulkMerge: element<HTMLButtonElement>('bulk-merge'),
   bulkApprove: element<HTMLButtonElement>('bulk-approve'),
   commentDialog: element<HTMLDialogElement>('comment-dialog'),
+  expandDialog: element<HTMLDialogElement>('expand-dialog'),
+  expandInput: element<HTMLInputElement>('expand-input'),
   commentTitle: element('comment-title'),
   commentBody: element<HTMLTextAreaElement>('comment-body'),
   commentHint: element('comment-hint'),
@@ -116,6 +118,13 @@ const dom = {
   bulkConfirmNote: element('bulk-confirm-note'),
   toast: element('toast'),
 };
+
+const MAX_EXPAND_LINES = 100_000;
+
+function storedExpandLines(): ExpandLines {
+  const lines = Number(localStorage.getItem('expandLines'));
+  return Number.isInteger(lines) && lines > 0 && lines <= MAX_EXPAND_LINES ? lines : 'all';
+}
 
 function storedLabels(): string[] {
   try {
@@ -141,7 +150,7 @@ const state: State = {
   selectedId: null,
   activeFileIndex: 0,
   diffStyle: localStorage.getItem('diffStyle') === 'unified' ? 'unified' : 'split',
-  expandLines: EXPAND_LINES_CHOICES.find((choice) => String(choice) === localStorage.getItem('expandLines')) ?? 'all',
+  expandLines: storedExpandLines(),
 };
 
 let viewer: string | null = null;
@@ -150,7 +159,7 @@ let viewerTeams: Set<string> | null = null;
 const diffCache = new Map<string, Promise<ParsedFile[]>>();
 const queueCache = new Map<QueueKind, PullRequest[]>();
 let isSelectedQueued = false;
-const diffView = new DiffView(dom.diffRoot, state.diffStyle, { onToggle: (id, isCollapsed) => markFileCollapsed(id, isCollapsed) });
+const diffView = new DiffView(dom.diffRoot, state.diffStyle, { onToggle: (id, isCollapsed) => markFileCollapsed(id, isCollapsed), onSeparatorMenu: (x, y) => openExpandMenu(x, y) });
 diffView.setExpandLines(state.expandLines);
 let currentFiles: ParsedFile[] = [];
 let renderToken = 0;
@@ -2361,13 +2370,52 @@ function expandLinesLabel(choice: ExpandLines): string {
   return choice === 'all' ? 'the whole gap' : `${choice} lines`;
 }
 
-/** Like the sort, one key steps through the choices and a toast names the one now in use. */
-function cycleExpandLines(): void {
-  const choice = EXPAND_LINES_CHOICES[(EXPAND_LINES_CHOICES.indexOf(state.expandLines) + 1) % EXPAND_LINES_CHOICES.length] ?? 'all';
+const EXPAND_PRESETS: readonly ExpandLines[] = [20, 100, 'all'];
+
+function setExpandLines(choice: ExpandLines): void {
   state.expandLines = choice;
   localStorage.setItem('expandLines', String(choice));
   diffView.setExpandLines(choice);
   toast(`Unmodified lines: a click shows ${expandLinesLabel(choice)}`);
+}
+
+/** Like the sort, one key steps through the presets (a custom count steps on to the whole gap) and a toast names the choice. */
+function cycleExpandLines(): void {
+  setExpandLines(EXPAND_PRESETS[(EXPAND_PRESETS.indexOf(state.expandLines) + 1) % EXPAND_PRESETS.length] ?? 'all');
+}
+
+const expandMenu = new PopoverMenu('Lines per click');
+
+/** Right-click on an "unmodified lines" separator: how much one click reveals. */
+function openExpandMenu(x: number, y: number): void {
+  sliceMenu.close();
+  sortMenu.close();
+  labelMenu.close();
+  const isCustom = !EXPAND_PRESETS.includes(state.expandLines);
+  const pick = (choice: ExpandLines) => () => {
+    expandMenu.close();
+    setExpandLines(choice);
+  };
+  expandMenu.openAt(x, y, () => [
+    {
+      title: 'Lines per click',
+      items: [
+        { label: '20 lines', checked: state.expandLines === 20, run: pick(20) },
+        { label: '100 lines', checked: state.expandLines === 100, run: pick(100) },
+        { label: isCustom ? `Custom · ${state.expandLines} lines` : 'Custom…', checked: isCustom, run: openCustomExpand },
+        { label: 'All', checked: state.expandLines === 'all', run: pick('all') },
+      ],
+    },
+  ]);
+}
+
+function openCustomExpand(): void {
+  expandMenu.close();
+  dom.expandInput.value = typeof state.expandLines === 'number' && !EXPAND_PRESETS.includes(state.expandLines) ? String(state.expandLines) : '';
+  dom.expandDialog.returnValue = '';
+  dom.expandDialog.showModal();
+  dom.expandInput.focus();
+  dom.expandInput.select();
 }
 
 function toggleStyle(): void {
@@ -2746,7 +2794,7 @@ const COMMANDS: Command[] = [
   ...DIFF_SCROLL_COMMANDS,
   { id: 'toggle-file', section: 'Diff', title: 'Collapse / expand file', aliases: 'fold unfold hide', keys: ['x'], run: toggleCurrentFile, isEnabled: hasFiles },
   { id: 'toggle-bots', section: 'Pull request', title: 'Show / hide bot comments', aliases: 'bots perry github-actions automated comments conversation', keys: ['⇧b'], run: () => { showBotComments = !showBotComments; localStorage.setItem('showBotComments', showBotComments ? '1' : '0'); const pull = selectedPull(); if (pull != null) renderDetail(pull); toast(showBotComments ? 'Showing bot comments' : 'Hiding bot comments'); } },
-  { id: 'expand-lines', section: 'Diff', title: 'Unmodified lines per click: whole gap / 20 / 50 / 100 (shift-click opens it all)', aliases: 'expand context hidden unchanged separator github', keys: ['⇧e'], run: cycleExpandLines },
+  { id: 'expand-lines', section: 'Diff', title: 'Unmodified lines per click: 20 / 100 / all (right-click a separator for a custom count)', aliases: 'expand context hidden unchanged separator github', keys: ['⇧e'], run: cycleExpandLines },
   { id: 'diff-style', section: 'Diff', title: 'Toggle split / unified diff', aliases: 'side by side inline view', keys: ['s', '⌘⌥s'], run: toggleStyle },
 
   { id: 'comment', section: 'Pull request', title: 'Write a comment', aliases: 'reply message mention note', keys: ['c'], run: openCommentDialog, isEnabled: hasPull },
@@ -2790,7 +2838,7 @@ function handleSequence(event: KeyboardEvent): boolean {
 }
 
 document.addEventListener('keydown', (event) => {
-  if ((event.isComposing && !event.altKey) || sliceMenu.isOpen || sortMenu.isOpen || lightbox.isOpen || dom.confirm.open || dom.help.open || dom.bulkConfirm.open || dom.triage.open || themePicker.isOpen || dom.commentDialog.open) return;
+  if ((event.isComposing && !event.altKey) || sliceMenu.isOpen || sortMenu.isOpen || labelMenu.isOpen || expandMenu.isOpen || dom.expandDialog.open || lightbox.isOpen || dom.confirm.open || dom.help.open || dom.bulkConfirm.open || dom.triage.open || themePicker.isOpen || dom.commentDialog.open) return;
   const target = event.target;
   const isTyping = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || (target instanceof HTMLElement && target.isContentEditable);
   if (isTyping && (event.key === 'Escape' || (event.key === 'Enter' && !event.metaKey))) {
@@ -2871,6 +2919,12 @@ dom.sliceButton.addEventListener('click', openSliceMenu);
 dom.groupButton.addEventListener('click', toggleGrouping);
 dom.fixButton.addEventListener('click', openTriage);
 dom.labelButton.addEventListener('click', openLabelMenu);
+element('expand-cancel').addEventListener('click', () => dom.expandDialog.close('cancel'));
+dom.expandDialog.addEventListener('close', () => {
+  if (dom.expandDialog.returnValue !== 'ok') return;
+  const lines = Number(dom.expandInput.value);
+  if (Number.isInteger(lines) && lines > 0) setExpandLines(Math.min(lines, MAX_EXPAND_LINES));
+});
 dom.sortButton.addEventListener('click', () => {
   sliceMenu.close();
   labelMenu.close();

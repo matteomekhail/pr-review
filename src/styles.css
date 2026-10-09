@@ -599,6 +599,12 @@ diffs-container { --diffs-dark-bg: var(--bg); --diffs-light-bg: var(--bg); }
 #pr-list li.checked.selected, #pr-list.visual li.checked.selected { background: color-mix(in srgb, var(--accent) 30%, var(--bg)); }
 .file.active, :root[data-theme=light] .file.active { background: color-mix(in srgb, var(--accent) 20%, var(--bg)); color: var(--text); }
 #comment-dialog { width: 600px; max-width: 90vw; }
+#expand-dialog { width: 340px; }
+#expand-input { width: 100%; box-sizing: border-box; height: 34px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: 13px "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-variant-numeric: tabular-nums; outline: none; }
+#expand-input { appearance: textfield; }
+#expand-input::-webkit-inner-spin-button, #expand-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+#expand-input:focus { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+#expand-dialog .expand-hint { margin: 8px 0 14px; font-size: 12px; line-height: 1.5; }
 #comment-dialog textarea { width: 100%; min-height: 140px; max-height: 50vh; resize: vertical; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: 13px/1.55 "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif; outline: none; }
 #comment-dialog textarea:focus { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
 #comment-dialog .comment-hint { margin: 8px 0 14px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

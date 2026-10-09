@@ -72,11 +72,23 @@ export class PopoverMenu {
     this.anchor?.setAttribute('aria-expanded', 'false');
     this.anchor = anchor;
     this.align = align;
-    this.build = build;
     anchor.setAttribute('aria-expanded', 'true');
+    this.show(build, anchor.getBoundingClientRect());
+  }
+
+  /** As a context menu: its top-left corner at the pointer. */
+  openAt(x: number, y: number, build: () => MenuSection[]): void {
+    this.anchor?.setAttribute('aria-expanded', 'false');
+    this.anchor = null;
+    this.align = 'start';
+    this.show(build, new DOMRect(x, y - 4, 0, 0));
+  }
+
+  private show(build: () => MenuSection[], rect: DOMRect): void {
+    this.build = build;
     this.root.hidden = false;
     this.render();
-    this.place(anchor);
+    this.place(rect);
     const checked = this.items.findIndex((item) => item.checked === true);
     this.setActive(Math.max(0, checked));
     this.root.focus({ preventScroll: true });
@@ -117,8 +129,7 @@ export class PopoverMenu {
       .join('');
   }
 
-  private place(anchor: HTMLElement): void {
-    const rect = anchor.getBoundingClientRect();
+  private place(rect: DOMRect): void {
     this.root.style.top = `${Math.round(rect.bottom + 4)}px`;
     this.root.style.maxHeight = `${Math.max(160, window.innerHeight - rect.bottom - 16)}px`;
     const left = this.align === 'end' ? rect.right - this.root.offsetWidth : rect.left;

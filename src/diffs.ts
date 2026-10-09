@@ -7,9 +7,7 @@ import { oldContents } from './hidden-lines';
 export type DiffStyle = 'split' | 'unified';
 
 /** How many unmodified lines one click on a separator reveals; `all` opens the whole gap. Shift-click always opens it all. */
-export type ExpandLines = 'all' | 20 | 50 | 100;
-
-export const EXPAND_LINES_CHOICES: readonly ExpandLines[] = ['all', 20, 50, 100];
+export type ExpandLines = 'all' | number;
 
 export interface ParsedFile {
   id: string;
@@ -25,6 +23,8 @@ export type HeadFileLoader = (path: string) => Promise<string>;
 
 interface DiffViewCallbacks {
   onToggle(id: string, isCollapsed: boolean): void;
+  /** A right-click on an "unmodified lines" separator, at these viewport coordinates. */
+  onSeparatorMenu(x: number, y: number): void;
 }
 
 type ViewOptions = NonNullable<ConstructorParameters<typeof CodeView<undefined, undefined>>[0]>;
@@ -96,6 +96,7 @@ export class DiffView {
     this.view = new CodeView<undefined, undefined>(this.options(), workerPool);
     this.view.setup(root);
     root.addEventListener('click', this.handleHeaderClick);
+    root.addEventListener('contextmenu', this.handleContextMenu);
   }
 
   setHeader(header: HTMLElement | undefined): void {
@@ -214,6 +215,13 @@ export class DiffView {
     if (load == null) throw new Error(`No head file for ${diff.name}`);
     const contents = await load(diff.name);
     return { oldFile: { name: diff.prevName ?? diff.name, contents: oldContents(diff, contents) }, newFile: { name: diff.name, contents } };
+  };
+
+  private readonly handleContextMenu = (event: MouseEvent): void => {
+    const isSeparator = event.composedPath().some((node) => node instanceof HTMLElement && (node.dataset.separator === 'line-info' || node.dataset.separator === 'line-info-basic'));
+    if (!isSeparator) return;
+    event.preventDefault();
+    this.callbacks.onSeparatorMenu(event.clientX, event.clientY);
   };
 
   private readonly handleHeaderClick = (event: MouseEvent): void => {
