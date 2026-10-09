@@ -5,7 +5,7 @@ import { decisionFromVerdicts } from './approval';
 /** A GitHub search behind a queue. */
 export type SearchKind = 'review' | 'mine' | 'involved' | 'reviewed';
 /** A tab: built from one or more searches (see QUEUE_SEARCHES in main.ts). */
-export type QueueKind = Exclude<SearchKind, 'reviewed'> | 'turn' | 'approved' | 'merged';
+export type QueueKind = Exclude<SearchKind, 'reviewed'> | 'turn' | 'approved' | 'merged' | 'reviews';
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
 export type MergeableState = 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
 export type CheckState = 'SUCCESS' | 'FAILURE' | 'ERROR' | 'PENDING' | 'EXPECTED';
@@ -61,6 +61,8 @@ export interface PullRequest {
   failingChecks: FailingCheck[];
   mergedAt: string | null;
   mergedBy: string | null;
+  /** When it was closed, merged or not; only reviewed searches ask, so open-work searches leave it null. */
+  closedAt: string | null;
   queueEntry: { position: number; state: string } | null;
   activity: PullActivity;
 }
@@ -77,11 +79,12 @@ interface RawAuthor {
   __typename?: string;
 }
 
-/** A search node. Merged searches leave out the costly fields (decision, checks, activity, queue entry). */
-interface RawPullRequest extends Omit<PullRequest, 'reviewDecision' | 'checkState' | 'failingChecks' | 'mergedAt' | 'mergedBy' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'activity' | 'labels'> {
+/** A search node. Merged and reviewed searches leave out the costly fields (decision, checks, merge state, queue entry). */
+interface RawPullRequest extends Omit<PullRequest, 'reviewDecision' | 'checkState' | 'failingChecks' | 'mergedAt' | 'mergedBy' | 'closedAt' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'activity' | 'labels'> {
   reviewDecision?: PullRequest['reviewDecision'];
   labels?: { nodes: ({ name: string } | null)[] };
   mergedAt?: string | null;
+  closedAt?: string | null;
   mergedBy?: { login: string } | null;
   mergeQueueEntry?: { position: number; state: string } | null;
   commits?: { nodes: { commit: { committedDate?: string; statusCheckRollup: { state: CheckState; contexts?: { nodes: RawCheckContext[] } } | null } }[] };
@@ -143,7 +146,7 @@ function toPullRequest(raw: RawPullRequest): PullRequest {
   const rollup = commits?.nodes[0]?.commit.statusCheckRollup;
   const activity = toActivity(raw);
   const reviewDecision = pull.reviewDecision ?? decisionFromVerdicts(pull.author?.login ?? null, activity.reviews);
-  return { ...pull, labels: (labels?.nodes ?? []).flatMap((label) => (label == null ? [] : [label.name])), reviewDecision, mergedAt: pull.mergedAt ?? null, mergedBy: mergedBy?.login ?? null, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: rollup?.state ?? null, failingChecks: toFailingChecks(rollup?.contexts?.nodes ?? []), activity };
+  return { ...pull, labels: (labels?.nodes ?? []).flatMap((label) => (label == null ? [] : [label.name])), reviewDecision, mergedAt: pull.mergedAt ?? null, mergedBy: mergedBy?.login ?? null, closedAt: pull.closedAt ?? null, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: rollup?.state ?? null, failingChecks: toFailingChecks(rollup?.contexts?.nodes ?? []), activity };
 }
 
 const MERGE_STATE_BATCH = 20;
@@ -195,6 +198,15 @@ export async function fetchQueue(kind: SearchKind, expected = 0): Promise<Search
 /** PRs merged since `since` in `orgs` (anything I was involved in when empty), by `author` when given (`@me` works). */
 export async function fetchMerged(since: string, orgs: readonly string[], author: string | null, expected = 0): Promise<SearchResult> {
   return parsePages(await invoke<string>('merged', { since, orgs, author, expected }));
+}
+
+/**
+ * PRs that may have had reviews since `since` (ms) in `orgs` (anything I was involved in when empty): open ones updated
+ * since, and ones closed since, each with its last 100 reviews. GitHub's 1,000-result cap is worked around by date
+ * ranges, so the list is complete.
+ */
+export async function fetchReviewed(since: number, orgs: readonly string[]): Promise<PullRequest[]> {
+  return parsePages(await invoke<string>('reviewed', { since: Math.floor(since / 1000), orgs })).pulls;
 }
 
 interface PullsResponse {

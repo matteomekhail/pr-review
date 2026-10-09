@@ -102,6 +102,18 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
       .filter((pull) => args.author == null || pull.author.login === (args.author === '@me' ? viewerLogin : args.author));
     return JSON.stringify([{ data: { search: { issueCount: nodes.length, nodes } } }]);
   },
+  // Every fixture, reviewed every few hours by one or two of four people (and a bot), some merged or closed since, so Reviews has periods and reviewers to rank.
+  reviewed: (args) => {
+    const reviewers = ['jordan-lee', 'alex-kim', 'priya-n', IS_DEMO ? DEMO_VIEWER : 'someone-else'];
+    const nodes = pulls
+      .map((pull, index) => {
+        const at = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+        const reviews = [{ state: 'COMMENTED', submittedAt: at(index * 3 + 1), author: { login: 'claude', avatarUrl: '', __typename: 'Bot' } }, { state: index % 3 === 0 ? 'APPROVED' : 'COMMENTED', submittedAt: at(index * 3 + 2), author: { login: reviewers[index % reviewers.length] as string, avatarUrl: '', __typename: 'User' } }, ...(index % 4 === 0 ? [{ state: 'APPROVED', submittedAt: at(index * 3 + 3), author: { login: reviewers[(index + 1) % reviewers.length] as string, avatarUrl: '', __typename: 'User' } }] : [])];
+        return { ...pull, id: `${pull.id}-reviewed`, number: pull.number - 2000, closedAt: index % 5 === 0 ? at(index) : null, mergedAt: index % 10 === 0 ? at(index) : null, mergedBy: index % 10 === 0 ? { login: 'sam-rivera' } : null, reviews: { nodes: reviews }, commits: undefined, reviewRequests: undefined, comments: undefined, reviewDecision: undefined, mergeQueueEntry: undefined };
+      })
+      .filter((pull) => pull.reviews.nodes.some((review) => Date.parse(review.submittedAt) / 1000 >= Number(args.since)));
+    return JSON.stringify([{ data: { search: { issueCount: nodes.length, nodes } } }]);
+  },
   pulls: (args) => JSON.stringify({ data: { nodes: (args.ids as string[]).map((id) => byId.get(id) ?? null) } }),
   merge: async (args) => {
     await new Promise((resolve) => setTimeout(resolve, Number(new URLSearchParams(location.search).get('mergeMs') ?? 0)));

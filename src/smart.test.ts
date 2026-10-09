@@ -28,6 +28,7 @@ function pull(overrides: Partial<PullRequest>): PullRequest {
     failingChecks: [],
     mergedAt: null,
     mergedBy: null,
+    closedAt: null,
     queueEntry: null,
     activity: { lastCommitAt: null, reviewRequests: [], reviews: [], comments: [], checks: [] },
     ...overrides,

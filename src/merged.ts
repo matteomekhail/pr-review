@@ -36,6 +36,11 @@ export function mergedSince(period: MergedPeriod, now = new Date()): string {
   }
 }
 
+/** People by count, most first, then by name. */
+export function ranked(counts: ReadonlyMap<string, number>): [string, number][] {
+  return [...counts].sort(([leftName, left], [rightName, right]) => right - left || leftName.localeCompare(rightName));
+}
+
 /** Authors by how many of these PRs they merged, most first, then by name. */
 export function authorCounts(pulls: readonly PullRequest[]): [string, number][] {
   const counts = new Map<string, number>();
@@ -43,5 +48,5 @@ export function authorCounts(pulls: readonly PullRequest[]): [string, number][] 
     const login = pull.author?.login;
     if (login != null) counts.set(login, (counts.get(login) ?? 0) + 1);
   });
-  return [...counts].sort(([leftName, left], [rightName, right]) => right - left || leftName.localeCompare(rightName));
+  return ranked(counts);
 }

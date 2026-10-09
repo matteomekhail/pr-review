@@ -11,7 +11,7 @@ function pull(activity: Partial<PullActivity>): PullRequest {
     id: 'id', number: 1, title: 't', url: 'https://github.com/o/r/pull/1', isDraft: false,
     createdAt: '2026-09-20T00:00:00Z', updatedAt: '2026-09-26T10:00:00Z', additions: 1, deletions: 1, changedFiles: 1,
     headRefName: 'h', headRefOid: 'abc', baseRefName: 'main', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: null,
-    author: { login: 'me', avatarUrl: '' }, repository: { nameWithOwner: 'o/r' }, checkState: 'SUCCESS', failingChecks: [], mergedAt: null, mergedBy: null, queueEntry: null,
+    author: { login: 'me', avatarUrl: '' }, repository: { nameWithOwner: 'o/r' }, checkState: 'SUCCESS', failingChecks: [], mergedAt: null, mergedBy: null, closedAt: null, queueEntry: null,
     activity: { lastCommitAt: '2026-09-25T09:00:00Z', reviewRequests: [], reviews: [], comments: [], checks: [], ...activity },
   };
 }

@@ -40,6 +40,7 @@ function pull(author: string, activity: Partial<PullActivity>, overrides: Partia
     failingChecks: [],
     mergedAt: null,
     mergedBy: null,
+    closedAt: null,
     queueEntry: null,
     activity: { lastCommitAt: '2026-09-25T09:00:00Z', reviewRequests: [], reviews: [], comments: [], checks: [], ...activity },
     ...overrides,

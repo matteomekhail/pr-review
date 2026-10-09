@@ -33,6 +33,24 @@ const MERGED_FIELDS: &str = r#"
 }"#;
 const MERGED_PAGE_SIZE: u64 = 100;
 
+/// Reviewed searches need who reviewed when, and like merged ones skip checks, merge state and the review decision.
+/// A 100-PR page with its reviews takes about 5s alone and can pass GitHub's 10s limit beside others, so pages hold 50.
+const REVIEWED_FIELDS: &str = r#"
+... on PullRequest {
+  id number title url isDraft
+  createdAt updatedAt closedAt mergedAt mergedBy { login } additions deletions changedFiles
+  headRefName headRefOid baseRefName
+  author { login avatarUrl }
+  repository { nameWithOwner }
+  labels(first: 20) { nodes { name } }
+  reviews(last: 100) { nodes { state submittedAt author { login avatarUrl __typename } } }
+}"#;
+const REVIEWED_PAGE_SIZE: u64 = 50;
+/// A date range over GitHub's 1,000-result cap is cut into pieces expected to hold about this many PRs each.
+const SEARCH_WINDOW_TARGET: u64 = 800;
+/// Date ranges paged at once; each pages SEARCH_PAGE_CONCURRENCY at a time.
+const WINDOWS_IN_FLIGHT: usize = 2;
+
 const MAX_MERGE_STATE_IDS: usize = 25;
 
 /// One page of review threads; the conversation asks for the first, `review_threads` for the rest.
@@ -251,6 +269,85 @@ async fn merged(since: String, orgs: Vec<String>, author: Option<String>, expect
         "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {MERGED_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {MERGED_FIELDS} }} }} }}"
     );
     let pages = search_pages(query, q, expected.unwrap_or(0), MERGED_PAGE_SIZE).await?;
+    serde_json::to_string(&pages).map_err(|error| error.to_string())
+}
+
+async fn search_count(q: &str) -> Result<u64, String> {
+    let page = search_page("query($q: String!) { search(query: $q, type: ISSUE, first: 0) { issueCount } }", q, None).await?;
+    Ok(page["data"]["search"]["issueCount"].as_u64().unwrap_or(0))
+}
+
+/// Seconds since the epoch as a search date, `YYYY-MM-DDTHH:MM:SS+00:00` (civil_from_days, after Howard Hinnant).
+fn search_time(seconds: i64) -> String {
+    let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}+00:00", rest / 3_600, rest % 3_600 / 60, rest % 60)
+}
+
+/// `{base} {field}:>=since` as date ranges that each match at most 1,000 PRs, which is all a search returns, with how
+/// many each matched. A range over the cap is cut evenly by its count and the pieces are counted again.
+async fn search_windows(base: &str, field: &str, since: i64, now: i64) -> Result<Vec<(String, u64)>, String> {
+    let query = |from: i64, to: Option<i64>| format!("{base} {field}:{}..{}", search_time(from), to.map_or_else(|| "*".to_string(), search_time));
+    let mut pending: Vec<(i64, Option<i64>)> = vec![(since, None)];
+    let mut windows = Vec::new();
+    while !pending.is_empty() {
+        let counts: Vec<_> = pending.iter().map(|(from, to)| {
+            let q = query(*from, *to);
+            tauri::async_runtime::spawn(async move { search_count(&q).await })
+        }).collect();
+        let mut next = Vec::new();
+        for ((from, to), count) in pending.into_iter().zip(counts) {
+            let count = count.await.map_err(|error| error.to_string())??;
+            let end = to.unwrap_or(now).max(from);
+            if count <= MAX_SEARCH_RESULTS || end - from < 120 {
+                windows.push((query(from, to), count));
+                continue;
+            }
+            let pieces = count.div_ceil(SEARCH_WINDOW_TARGET) as i64;
+            let step = (end - from + pieces - 1) / pieces;
+            next.extend((0..pieces).map(|piece| (from + piece * step, if piece == pieces - 1 { to } else { Some(from + (piece + 1) * step) })));
+        }
+        pending = next;
+    }
+    Ok(windows)
+}
+
+/// PRs someone may have reviewed since `since` (seconds since the epoch) in `orgs` (or anything I was involved in when
+/// none are known): open ones updated since, as a review updates its PR, and ones closed since. Each search is cut into
+/// date ranges under GitHub's 1,000-result cap, so the list is complete; created-asc keeps paging steady while it runs.
+/// 90 days of a ~400-PR-a-week org is about 70 pages and a minute; a week, a dozen pages and a few seconds.
+#[tauri::command]
+async fn reviewed(since: i64, orgs: Vec<String>) -> Result<String, String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
+    if since <= 0 || since >= now || orgs.len() > 10 || !orgs.iter().all(|org| is_safe_segment(org)) {
+        return Err("invalid reviewed search".to_string());
+    }
+    let scope = if orgs.is_empty() { "involves:@me".to_string() } else { orgs.iter().map(|org| format!("org:{org}")).collect::<Vec<_>>().join(" ") };
+    let query = format!(
+        "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {REVIEWED_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {REVIEWED_FIELDS} }} }} }}"
+    );
+    let mut windows = Vec::new();
+    for (state, field) in [("is:open archived:false", "updated"), ("is:closed", "closed")] {
+        windows.extend(search_windows(&format!("is:pr {state} {scope} sort:created-asc"), field, since, now).await?.into_iter().filter(|(_, count)| *count > 0));
+    }
+    let mut pages = Vec::new();
+    for batch in windows.chunks(WINDOWS_IN_FLIGHT) {
+        let handles: Vec<_> = batch.iter().map(|(q, count)| {
+            let (query, q, count) = (query.clone(), q.clone(), *count);
+            tauri::async_runtime::spawn(async move { search_pages(query, q, count, REVIEWED_PAGE_SIZE).await })
+        }).collect();
+        for handle in handles {
+            pages.extend(handle.await.map_err(|error| error.to_string())??);
+        }
+    }
     serde_json::to_string(&pages).map_err(|error| error.to_string())
 }
 
@@ -700,7 +797,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, merged, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, file_at, line_comment, reply_comment, review_threads, resolve_thread, submit_review, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, merged, reviewed, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, file_at, line_comment, reply_comment, review_threads, resolve_thread, submit_review, approve, merge, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }
@@ -715,6 +812,13 @@ mod tests {
         assert_eq!(base64("a"), "YQ==");
         assert_eq!(base64("ab"), "YWI=");
         assert_eq!(base64("abc"), "YWJj");
+    }
+
+    #[test]
+    fn search_times_are_utc_dates() {
+        assert_eq!(search_time(0), "1970-01-01T00:00:00+00:00");
+        assert_eq!(search_time(951_782_400), "2000-02-29T00:00:00+00:00");
+        assert_eq!(search_time(1_791_504_000 + 3_723), "2026-10-09T01:02:03+00:00");
     }
 
     #[test]

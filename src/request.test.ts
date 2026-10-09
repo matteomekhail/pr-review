@@ -30,6 +30,7 @@ function pull(author: string, reviewRequests: PullActivity['reviewRequests']): P
     failingChecks: [],
     mergedAt: null,
     mergedBy: null,
+    closedAt: null,
     queueEntry: null,
     activity: { lastCommitAt: null, reviewRequests, reviews: [], comments: [], checks: [] },
   };

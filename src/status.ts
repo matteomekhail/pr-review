@@ -1,7 +1,7 @@
 import type { PullRequest } from './github';
 import { latestVerdicts } from './approval';
 
-export type StatusTone = 'merged' | 'queued' | 'blocked' | 'draft' | 'approved' | 'pending';
+export type StatusTone = 'merged' | 'closed' | 'queued' | 'blocked' | 'draft' | 'approved' | 'pending';
 export type AttentionReason = 'conflicts' | 'failing checks' | 'changes requested' | 'blocked' | 'not approved';
 
 export const ATTENTION_ORDER: readonly AttentionReason[] = ['conflicts', 'failing checks', 'changes requested', 'blocked', 'not approved'];
@@ -75,6 +75,7 @@ export function describeBlockers(pull: PullRequest): string[] {
 
 export function prStatus(pull: PullRequest): { tone: StatusTone; label: string; blocker?: Blocker } {
   if (pull.mergedAt != null) return { tone: 'merged', label: 'Merged' };
+  if (pull.closedAt != null) return { tone: 'closed', label: 'Closed without merging' };
   if (pull.queueEntry != null) return { tone: 'queued', label: 'In merge queue' };
   const [blocker] = blockers(pull);
   if (blocker != null) return { tone: 'blocked', label: BLOCKER_LABELS[blocker], blocker };

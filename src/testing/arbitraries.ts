@@ -35,6 +35,7 @@ export const pullArbitrary: fc.Arbitrary<PullRequest> = fc.record({
   failingChecks: [],
   mergedAt: null,
   mergedBy: null,
+  closedAt: null,
   activity: { lastCommitAt: null, reviewRequests: [], reviews: [], comments: [], checks: [] },
 }));
 

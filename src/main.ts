@@ -8,7 +8,7 @@ import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, de
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, commentOnLines, commentOnPull, replyToThread, resolveThread, submitReview, type ReviewCommentInput, type ReviewEvent, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
+import { approvePull, commentOnLines, commentOnPull, replyToThread, resolveThread, submitReview, type ReviewCommentInput, type ReviewEvent, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, fetchReviewed, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
 import type { SelectedLineRange } from '@pierre/diffs';
 import { DiffView, parseDiff, type AnnotationRef, type DiffAnnotation, type DiffStyle, type ExpandLines, type ParsedFile } from './diffs';
 import { composerHtml, pendingHtml, replyRowHtml, threadHtml } from './inline-comments';
@@ -34,6 +34,7 @@ import { verdictOf, withMyApproval } from './approval';
 import { mergeSearch } from './sync';
 import { PopoverMenu, type MenuSection } from './menu';
 import { authorCounts, MERGED_PERIODS, mergedSince, type MergedPeriod } from './merged';
+import { lastReviewAt, reviewerCounts, reviewsSince } from './reviews';
 import { botReviews, describeBotReview } from './review-bots';
 
 interface State {
@@ -45,9 +46,12 @@ interface State {
   /** A PR shows when it has any of these; none means no label filter. */
   labelFilter: string[];
   askScope: AskScope;
+  /** The period Merged and Reviews cover. */
   mergedPeriod: MergedPeriod;
   /** Whose merged PRs: empty for everyone, `@me`, or a login. */
   mergedAuthor: string;
+  /** Whose reviews: empty for everyone, `@me`, or a login. */
+  reviewer: string;
   sortOrder: SortOrder;
   checkedIds: Set<string>;
   selectedId: string | null;
@@ -60,7 +64,7 @@ const PREFETCH_AHEAD = 5;
 const DIFF_CACHE_LIMIT = 24;
 /** Every tab syncs this often while the window is visible; a sync that finds nothing new leaves the screen alone. */
 const SYNC_INTERVAL_MS = 60_000;
-const VIEW_TITLES: Record<QueueKind, string> = { turn: 'My turn', review: 'Review', involved: 'Involved', mine: 'Mine', approved: 'Approved', merged: 'Merged' };
+const VIEW_TITLES: Record<QueueKind, string> = { turn: 'My turn', review: 'Review', involved: 'Involved', mine: 'Mine', approved: 'Approved', merged: 'Merged', reviews: 'Reviews' };
 const MERGE_LABELS: Record<MergeMethod, string> = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' };
 
 const element = <T extends HTMLElement>(id: string): T => {
@@ -154,6 +158,7 @@ const state: State = {
   askScope: (['me', 'team'] as const).find((scope) => scope === localStorage.getItem('askScope')) ?? 'all',
   mergedPeriod: (Object.keys(MERGED_PERIODS) as MergedPeriod[]).find((period) => period === localStorage.getItem('mergedPeriod')) ?? '7d',
   mergedAuthor: localStorage.getItem('mergedAuthor') ?? '',
+  reviewer: localStorage.getItem('reviewer') ?? '',
   sortOrder: (localStorage.getItem('sortOrder') as SortOrder | null) ?? 'smart',
   checkedIds: new Set<string>(),
   selectedId: null,
@@ -403,9 +408,19 @@ function withLeaving(ranked: PullRequest[]): PullRequest[] {
   return [...ranked, ...[...leaving.values()].filter((entry) => !present.has(entry.pull.id)).map((entry) => entry.pull)];
 }
 
+/** Merged and Reviews look back over a period rather than at open work: no sorting, grouping, smart filters or merge states. */
+function isHistory(kind: QueueKind): kind is 'merged' | 'reviews' {
+  return kind === 'merged' || kind === 'reviews';
+}
+
+/** Neither merged nor closed. */
+function isOpen(pull: PullRequest): boolean {
+  return pull.mergedAt == null && pull.closedAt == null;
+}
+
 /** My own PRs, and ones I already approved, have no open requests to scope, so the menu neither shows nor applies there. */
 function hasAskScope(kind: QueueKind): boolean {
-  return kind !== 'mine' && kind !== 'approved' && kind !== 'merged';
+  return kind !== 'mine' && kind !== 'approved' && !isHistory(kind);
 }
 
 function matchesAskScope(pull: PullRequest, kind: QueueKind): boolean {
@@ -423,7 +438,7 @@ function matchesLabel(pull: PullRequest): boolean {
 /** The repository, label, review-request and smart filters, shared by the list and the tab counts; text search is left to the list. */
 function matchesFilters(pull: PullRequest, now: number, kind: QueueKind = state.kind): boolean {
   if (!matchesRepo(pull) || !matchesLabel(pull)) return false;
-  if (kind === 'merged') return true;
+  if (isHistory(kind)) return true;
   if (!matchesAskScope(pull, kind)) return false;
   if (state.smartFilter === 'waiting') return turnFor(pull)?.whose === 'theirs';
   if (state.smartFilter === 'attention') return isMergeStateSettled(pull) && needsAttention(pull);
@@ -448,8 +463,8 @@ function computeLists(): void {
   const needle = state.filter.trim().toLowerCase();
   const now = Date.now();
   const matching = state.pulls.filter((pull) => matchesFilters(pull, now) && matchesText(pull, needle));
-  const ranked = state.kind === 'merged' ? [...matching].sort((left, right) => Date.parse(right.mergedAt ?? '') - Date.parse(left.mergedAt ?? '')) : sortPulls(matching, state.sortOrder, now, aiScoreFor);
-  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.kind === 'merged' ? mergedKey() : '', state.repoFilter, state.labelFilter.join(','), state.askScope, state.smartFilter, state.sortOrder, needle, isGroupingOn()].join('|'));
+  const ranked = state.kind === 'merged' ? [...matching].sort((left, right) => Date.parse(right.mergedAt ?? '') - Date.parse(left.mergedAt ?? '')) : state.kind === 'reviews' ? byLastReview(matching) : sortPulls(matching, state.sortOrder, now, aiScoreFor);
+  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.kind === 'merged' ? mergedKey() : state.kind === 'reviews' ? `${reviewsKey()}:${state.reviewer}` : '', state.repoFilter, state.labelFilter.join(','), state.askScope, state.smartFilter, state.sortOrder, needle, isGroupingOn()].join('|'));
   visibleCache = !isGroupingOn() || groups.length === 0 ? filteredCache : listSections(filteredCache).flatMap((section) => (section.group != null && collapsedGroups.has(section.group.id) ? [] : section.pulls));
 }
 
@@ -472,8 +487,9 @@ const SMART_KEYS: Partial<Record<SmartFilter, string>> = { all: '⌥0', ready: '
 const ASK_LABELS: Record<AskScope, string> = { all: 'Me + team', me: 'Only me', team: 'Only team' };
 const SORT_LABELS: Record<SortOrder, string> = { smart: 'Smart', updated: 'Recently updated', size: 'Smallest first' };
 
-function mergedAuthorLabel(author: string): string {
-  return author === '' ? 'Everyone' : author === '@me' ? 'Me' : author;
+/** A person filter on Merged or Reviews: empty for everyone, `@me`, or a login. */
+function personLabel(person: string): string {
+  return person === '' ? 'Everyone' : person === '@me' ? 'Me' : person;
 }
 
 /** The label filter has its own button, but the selector names it too: it narrows the count beside it, in every tab. */
@@ -482,9 +498,9 @@ function labelFilterLabel(): string {
   return state.labelFilter.length === 1 ? (state.labelFilter[0] ?? '') : `${state.labelFilter.length} labels`;
 }
 
-/** The selector names the filters in effect, or All; on Merged, the period and author. The repository goes last, so a long name is what gets cut. */
+/** The selector names the filters in effect, or All; on Merged and Reviews, the period and person. The repository goes last, so a long name is what gets cut. */
 function sliceLabel(): string {
-  if (state.kind === 'merged') return [MERGED_PERIODS[state.mergedPeriod], mergedAuthorLabel(state.mergedAuthor), labelFilterLabel()].filter((part) => part !== '').join(' · ');
+  if (isHistory(state.kind)) return [MERGED_PERIODS[state.mergedPeriod], personLabel(state.kind === 'merged' ? state.mergedAuthor : state.reviewer), labelFilterLabel()].filter((part) => part !== '').join(' · ');
   const parts = [hasAskScope(state.kind) && state.askScope !== 'all' ? ASK_LABELS[state.askScope] : '', state.smartFilter === 'all' ? '' : SMART_LABELS[state.smartFilter], labelFilterLabel(), state.repoFilter === '' ? '' : (state.repoFilter.split('/')[1] ?? state.repoFilter)];
   return parts.filter((part) => part !== '').join(' · ') || 'All';
 }
@@ -492,9 +508,9 @@ function sliceLabel(): string {
 function renderSlice(): void {
   dom.sliceLabel.textContent = sliceLabel();
   dom.sliceCount.textContent = String(filteredPulls().length);
-  dom.sortButton.hidden = state.kind === 'merged';
-  dom.groupButton.hidden = state.kind === 'merged';
-  dom.fixButton.hidden = state.kind === 'merged';
+  dom.sortButton.hidden = isHistory(state.kind);
+  dom.groupButton.hidden = isHistory(state.kind);
+  dom.fixButton.hidden = isHistory(state.kind);
   dom.groupButton.setAttribute('aria-pressed', String(isGrouped));
   dom.groupButton.dataset.tip = `${isGrouped ? 'Ungroup' : 'Group related work'}  ⇧T`;
   dom.labelButton.setAttribute('aria-pressed', String(state.labelFilter.length > 0));
@@ -504,9 +520,10 @@ function renderSlice(): void {
   sortMenu.refresh();
 }
 
-/** What the selector offers: open work filters by requests (where they apply), state and repository; Merged by period and author. Labels have their own menu. */
+/** What the selector offers: open work filters by requests (where they apply), state and repository; Merged by period and author, Reviews by period and reviewer. Labels have their own menu. */
 function sliceSections(): MenuSection[] {
   if (state.kind === 'merged') return [periodSection(), authorSection(), repoSection()];
+  if (state.kind === 'reviews') return [periodSection(), reviewerSection(), repoSection()];
   return [...(hasAskScope(state.kind) ? [requestSection()] : []), showSection(), repoSection()];
 }
 
@@ -564,9 +581,20 @@ function labelSections(): MenuSection[] {
 
 /**
  * GitHub's count for each period searched so far. With a repository or label chosen it counts the PRs loaded for that
- * period instead, so it matches the list; a "+" means GitHub stopped at 1,000 and there may be more.
+ * period instead, so it matches the list; a "+" means GitHub stopped at 1,000 and there may be more. On Reviews, the PRs
+ * the chosen reviewer reviewed in each period loaded so far.
  */
 function periodSection(): MenuSection {
+  if (state.kind === 'reviews') {
+    return {
+      title: 'Period',
+      items: (Object.keys(MERGED_PERIODS) as MergedPeriod[]).map((period) => {
+        const known = searches.get(reviewsKey(period));
+        const count = known == null ? undefined : String(reviewedPulls(known.pulls, period).filter((pull) => matchesRepo(pull) && matchesLabel(pull)).length);
+        return { label: MERGED_PERIODS[period], count, checked: state.mergedPeriod === period, run: () => setReviewsFilter(period, state.reviewer) };
+      }),
+    };
+  }
   const isNarrowed = state.repoFilter !== '' || state.labelFilter.length > 0;
   const count = (known: SearchResult | undefined): string | undefined => {
     if (known == null) return undefined;
@@ -592,8 +620,22 @@ function authorSection(): MenuSection {
   const others = counts.filter(([login]) => !isMe(login));
   if (state.mergedAuthor !== '' && state.mergedAuthor !== '@me' && !others.some(([login]) => login === state.mergedAuthor)) others.unshift([state.mergedAuthor, state.pulls.filter(repoMatch).length]);
   const known = everyone != null;
-  const item = (author: string, count: number | null) => ({ label: mergedAuthorLabel(author), count: count == null ? undefined : String(count), checked: state.mergedAuthor === author, run: () => setMergedFilter(state.mergedPeriod, author) });
+  const item = (author: string, count: number | null) => ({ label: personLabel(author), count: count == null ? undefined : String(count), checked: state.mergedAuthor === author, run: () => setMergedFilter(state.mergedPeriod, author) });
   return { title: 'Author', items: [item('', known ? counts.reduce((sum, [, count]) => sum + count, 0) : null), item('@me', known ? (counts.find(([login]) => isMe(login))?.[1] ?? 0) : null), ...others.map(([login, count]) => item(login, count))] };
+}
+
+/** Everyone (PRs anyone reviewed), me, then whoever reviewed in the period, most PRs first: who reviewed the most. */
+function reviewerSection(): MenuSection {
+  const known = searches.get(reviewsKey());
+  const since = periodStart();
+  const pulls = (known?.pulls ?? []).filter((pull) => matchesRepo(pull) && matchesLabel(pull));
+  const counts = reviewerCounts(pulls, since);
+  const isMe = (login: string): boolean => login.toLowerCase() === viewer?.toLowerCase();
+  const others = counts.filter(([login]) => !isMe(login));
+  if (state.reviewer !== '' && state.reviewer !== '@me' && !others.some(([login]) => login === state.reviewer)) others.unshift([state.reviewer, 0]);
+  const count = (value: number): string | undefined => (known == null ? undefined : String(value));
+  const item = (reviewer: string, value: number) => ({ label: personLabel(reviewer), count: count(value), checked: state.reviewer === reviewer, run: () => setReviewsFilter(state.mergedPeriod, reviewer) });
+  return { title: 'Reviewer', items: [item('', reviewedPulls(pulls, state.mergedPeriod, '').length), item('@me', counts.find(([login]) => isMe(login))?.[1] ?? 0), ...others.map(([login, value]) => item(login, value))] };
 }
 
 function sortSections(): MenuSection[] {
@@ -630,6 +672,20 @@ function setMergedFilter(period: MergedPeriod, author: string): void {
   applyQueue(queueCache.get('merged') ?? []);
   renderCounts();
   void refresh('merged');
+}
+
+/** Changing period shows its cached reviews at once, or none while GitHub answers; changing reviewer only narrows the list. */
+function setReviewsFilter(period: MergedPeriod, reviewer: string): void {
+  const isNewPeriod = period !== state.mergedPeriod;
+  state.mergedPeriod = period;
+  state.reviewer = reviewer;
+  localStorage.setItem('mergedPeriod', period);
+  localStorage.setItem('reviewer', reviewer);
+  stableOrder.reset();
+  queueCache.set('reviews', deriveQueue('reviews'));
+  applyQueue(queueCache.get('reviews') ?? []);
+  renderCounts();
+  if (isNewPeriod) void refresh('reviews');
 }
 
 /** From a shortcut, picking the scope already shown goes back to both, like the smart filters. */
@@ -766,9 +822,9 @@ function renderCounts(): void {
 const GROUPS_CACHE_KEY = 'jevGroups.v2';
 let isGrouped = localStorage.getItem('grouped') === '1';
 
-/** Grouping is for open work; merged history stays a plain, newest-first list. */
+/** Grouping is for open work; merged and reviewed history stays a plain, newest-first list. */
 function isGroupingOn(): boolean {
-  return isGrouped && state.kind !== 'merged';
+  return isGrouped && !isHistory(state.kind);
 }
 let groups: PullGroup[] = [];
 let groupsSignature = '';
@@ -906,8 +962,10 @@ function turnMarker(pull: PullRequest): string {
   return `<span class="turn theirs" title="${escapeHtml(waitingLabel(turn))}">${icon('hourglass')}</span>`;
 }
 
-/** Time since the last update, or since the merge for merged PRs. */
+/** Time since the last update; on Reviews, since the last review in the period; for other merged PRs, since the merge. */
 function ageLabel(pull: PullRequest): string {
+  const reviewedAt = state.kind === 'reviews' ? lastReviewAt(pull, periodStart(), reviewerLogin()) : null;
+  if (reviewedAt != null) return `<span class="age" title="${escapeHtml(reviewedTitle(pull))}">${relativeTime(new Date(reviewedAt).toISOString())}</span>`;
   if (pull.mergedAt == null) return `<span class="age">${relativeTime(pull.updatedAt)}</span>`;
   return `<span class="age" title="${escapeHtml(`Merged ${relativeTime(pull.mergedAt)} ago${pull.mergedBy == null ? '' : ` by @${pull.mergedBy}`}`)}">${relativeTime(pull.mergedAt)}</span>`;
 }
@@ -946,7 +1004,7 @@ function renderListEmpty(count: number, needle: string): void {
     checking: `<div class="empty-overlay"><b>Checking merge status…</b><span>Asking GitHub which PRs are ready to merge</span></div>`,
     'no-results': `${icon('search', 'empty-ico')}<b>No pull requests match “${escapeHtml(needle)}”</b><span>Try another word, or clear the filter</span><button type="button" class="ghost" data-empty-action="clear-filter">Clear filter <kbd>esc</kbd></button>`,
     filtered: `${icon('circleCheck', 'empty-ico')}<b>${filteredTitle}</b><span>Everything else is still in All</span><button type="button" class="ghost" data-empty-action="show-all">Show all <kbd>⌥</kbd><kbd>0</kbd></button>`,
-    empty: state.kind === 'merged' ? `${icon('merge', 'empty-ico')}<b>Nothing merged</b><span>${escapeHtml(MERGED_PERIODS[state.mergedPeriod])}, ${state.mergedAuthor === '' ? 'by anyone' : state.mergedAuthor === '@me' ? 'by you' : `by @${escapeHtml(state.mergedAuthor)}`}</span>` : `${icon('circleCheck', 'empty-ico')}<b>Inbox zero</b><span>No open pull requests in this view</span>`,
+    empty: state.kind === 'merged' ? `${icon('merge', 'empty-ico')}<b>Nothing merged</b><span>${escapeHtml(MERGED_PERIODS[state.mergedPeriod])}, ${state.mergedAuthor === '' ? 'by anyone' : state.mergedAuthor === '@me' ? 'by you' : `by @${escapeHtml(state.mergedAuthor)}`}</span>` : state.kind === 'reviews' ? `${icon('userCheck', 'empty-ico')}<b>No reviews</b><span>${escapeHtml(MERGED_PERIODS[state.mergedPeriod])}, ${state.reviewer === '' ? 'by anyone' : state.reviewer === '@me' ? 'by you' : `by @${escapeHtml(state.reviewer)}`}</span>` : `${icon('circleCheck', 'empty-ico')}<b>Inbox zero</b><span>No open pull requests in this view</span>`,
   };
   box.innerHTML = kind === '' ? '' : kind === 'checking' ? `<div class="list-checking">${listSkeleton()}${views[kind]}</div>` : `<div class="list-empty-inner">${views[kind]}</div>`;
   box.hidden = kind === '';
@@ -1256,10 +1314,11 @@ function renderDetailMeta(pull: PullRequest): void {
     `<span class="status-summary" title="${escapeHtml(summary)}">${statusIcon(pull)}</span>`,
   ].join('');
   const isMerged = pull.mergedAt != null;
-  dom.merge.disabled = isMerged || pull.isDraft || pull.mergeable === 'CONFLICTING' || pull.queueEntry != null || leaving.has(pull.id);
+  const isClosed = !isMerged && pull.closedAt != null;
+  dom.merge.disabled = isMerged || isClosed || pull.isDraft || pull.mergeable === 'CONFLICTING' || pull.queueEntry != null || leaving.has(pull.id);
   const isOwn = isOwnPull(pull);
-  dom.approve.disabled = isOwn || isMerged;
-  dom.approve.title = isMerged ? 'Already merged' : isOwn ? 'You can’t approve your own pull request' : 'Approve  A';
+  dom.approve.disabled = isOwn || isMerged || isClosed;
+  dom.approve.title = isMerged ? 'Already merged' : isClosed ? 'Closed' : isOwn ? 'You can’t approve your own pull request' : 'Approve  A';
   if (pull.queueEntry != null) {
     dom.merge.innerHTML = `${MERGE_ICON}<span class="merge-count">#${pull.queueEntry.position + 1}</span>`;
     dom.merge.title = `In merge queue #${pull.queueEntry.position + 1}`;
@@ -1432,10 +1491,10 @@ function openReviewDialog(): void {
   const pull = selectedPull();
   if (pull == null || dom.reviewDialog.open) return;
   const count = pendingComments(pull).length;
-  const canApprove = !isOwnPull(pull) && pull.mergedAt == null;
+  const canApprove = !isOwnPull(pull) && isOpen(pull);
   const approve = dom.reviewDialog.querySelector<HTMLInputElement>('input[value="APPROVE"]');
   if (approve != null) approve.disabled = !canApprove;
-  element('review-approve-note').textContent = canApprove ? 'Ready to merge from your side' : isOwnPull(pull) ? 'You can’t approve your own pull request' : 'Already merged';
+  element('review-approve-note').textContent = canApprove ? 'Ready to merge from your side' : isOwnPull(pull) ? 'You can’t approve your own pull request' : pull.mergedAt == null ? 'Closed' : 'Already merged';
   const comment = dom.reviewDialog.querySelector<HTMLInputElement>('input[value="COMMENT"]');
   if (comment != null) comment.checked = true;
   dom.reviewNote.textContent = count === 0 ? 'No pending comments: the summary goes out on its own.' : `${count} pending comment${count === 1 ? '' : 's'} will be published with it.`;
@@ -2035,7 +2094,7 @@ function scheduleAiRender(): void {
 
 async function scoreWithJev(pulls: PullRequest[]): Promise<void> {
   if (!isAiEnabled) return;
-  const queue = pulls.filter((pull) => !pull.isDraft && pull.mergedAt == null && !aiResults.has(aiKey(pull)) && !aiPending.has(aiKey(pull)));
+  const queue = pulls.filter((pull) => !pull.isDraft && isOpen(pull) && !aiResults.has(aiKey(pull)) && !aiPending.has(aiKey(pull)));
   queue.forEach((pull) => aiPending.add(aiKey(pull)));
   const worker = async (): Promise<void> => {
     for (let pull = queue.shift(); pull != null; pull = queue.shift()) {
@@ -2118,13 +2177,17 @@ async function loadMergeStates(pulls: PullRequest[]): Promise<void> {
 }
 
 /** The searches behind each tab. A search shared by tabs is fetched once and feeds all of them. */
-const QUEUE_SEARCHES: Record<Exclude<QueueKind, 'merged'>, readonly SearchKind[]> = { turn: ['review', 'mine', 'reviewed'], review: ['review'], mine: ['mine'], involved: ['involved'], approved: ['reviewed'] };
-const QUEUE_KINDS: readonly QueueKind[] = [...(Object.keys(QUEUE_SEARCHES) as QueueKind[]), 'merged'];
+const QUEUE_SEARCHES: Record<Exclude<QueueKind, 'merged' | 'reviews'>, readonly SearchKind[]> = { turn: ['review', 'mine', 'reviewed'], review: ['review'], mine: ['mine'], involved: ['involved'], approved: ['reviewed'] };
+const QUEUE_KINDS: readonly QueueKind[] = [...(Object.keys(QUEUE_SEARCHES) as QueueKind[]), 'merged', 'reviews'];
 const SEARCH_KINDS: readonly SearchKind[] = ['review', 'mine', 'involved', 'reviewed'];
 /** Searches outlive restarts, so the app opens on the last data it saw while it refreshes. */
 const SEARCH_CACHE_KEY = 'searchCache.v3';
 /** Merged searches are keyed `merged:<period>:<author>`; the author is empty for everyone. */
 const MERGED_PREFIX = 'merged:';
+/** Reviewed searches are keyed `reviews:<period>`; the reviewer only narrows the list, so it is not part of the key. */
+const REVIEWS_PREFIX = 'reviews:';
+/** The reviewed search is kept across restarts only below this size, to leave room in storage for the rest. */
+const MAX_CACHED_REVIEWS_CHARS = 1_500_000;
 /** A forced refresh still reuses a search that finished this recently, e.g. for another tab. */
 const FRESH_SEARCH_MS = 3_000;
 /** GitHub's search index trails reviews by minutes; a PR I reviewed here stays in my reviewed search meanwhile. */
@@ -2141,8 +2204,44 @@ function mergedKey(author = state.mergedAuthor): string {
   return `${MERGED_PREFIX}${state.mergedPeriod}:${author}`;
 }
 
+function reviewsKey(period = state.mergedPeriod): string {
+  return `${REVIEWS_PREFIX}${period}`;
+}
+
+/** Where the current period starts, in ms. */
+function periodStart(period = state.mergedPeriod): number {
+  return Date.parse(mergedSince(period));
+}
+
+/** The chosen reviewer's login, or empty for anyone. */
+function reviewerLogin(): string {
+  return state.reviewer === '@me' ? (viewer ?? '@me') : state.reviewer;
+}
+
+/** PRs reviewed in the period by the chosen reviewer (anyone when empty), as the Reviews list shows them. */
+function reviewedPulls(pulls: readonly PullRequest[], period = state.mergedPeriod, reviewer = reviewerLogin()): PullRequest[] {
+  const since = periodStart(period);
+  return pulls.filter((pull) => lastReviewAt(pull, since, reviewer) != null);
+}
+
+/** Newest review first. */
+function byLastReview(pulls: readonly PullRequest[]): PullRequest[] {
+  const since = periodStart();
+  const reviewer = reviewerLogin();
+  const at = new Map(pulls.map((pull) => [pull.id, lastReviewAt(pull, since, reviewer) ?? 0]));
+  return [...pulls].sort((left, right) => (at.get(right.id) ?? 0) - (at.get(left.id) ?? 0));
+}
+
+/** Who reviewed it in the period, latest first, for a row's tooltip. */
+function reviewedTitle(pull: PullRequest): string {
+  const people = [...new Set(reviewsSince(pull, periodStart()).reverse().map((review) => `@${review.author.login}`))];
+  return `Reviewed by ${people.join(', ')}`;
+}
+
 function searchesFor(kind: QueueKind): readonly string[] {
-  return kind === 'merged' ? [mergedKey()] : QUEUE_SEARCHES[kind];
+  if (kind === 'merged') return [mergedKey()];
+  if (kind === 'reviews') return [reviewsKey()];
+  return QUEUE_SEARCHES[kind];
 }
 
 /** The organisations merged PRs are searched in: my teams', else those of the repositories in my queues. */
@@ -2153,9 +2252,26 @@ function mergedOrgs(): string[] {
 }
 
 function fetchSearch(key: string, expected: number): Promise<SearchResult> {
+  if (key.startsWith(REVIEWS_PREFIX)) return fetchReviews(key);
   if (!key.startsWith(MERGED_PREFIX)) return fetchQueue(key as SearchKind, expected);
   const [period, author] = key.slice(MERGED_PREFIX.length).split(':') as [MergedPeriod, string];
   return fetchMerged(mergedSince(period), mergedOrgs(), author === '' ? null : author, expected);
+}
+
+/**
+ * A whole period of reviews takes from a few seconds (a week) to a minute (90 days), so it is fetched in full only the
+ * first time and on a manual refresh. Syncs ask for what changed since the last fetch, less the search index's lag,
+ * and fold it in. Only PRs someone reviewed in the period are kept.
+ */
+async function fetchReviews(key: string): Promise<SearchResult> {
+  const since = periodStart(key.slice(REVIEWS_PREFIX.length) as MergedPeriod);
+  const cached = loudRefreshes.has('reviews') ? undefined : searches.get(key);
+  const previous = cached?.pulls ?? [];
+  const fetched = await fetchReviewed(cached == null ? since : Math.max(since, cached.at - SEARCH_LAG_MS), mergedOrgs());
+  const fresh = new Map(fetched.map((pull) => [pull.id, pull]));
+  const known = new Set(previous.map((pull) => pull.id));
+  const pulls = [...previous.map((pull) => fresh.get(pull.id) ?? pull), ...fetched.filter((pull) => !known.has(pull.id))].filter((pull) => reviewsSince(pull, since).length > 0);
+  return { pulls, total: pulls.length };
 }
 
 function loadSearch(key: string, maxAgeMs: number): Promise<void> {
@@ -2196,9 +2312,11 @@ function fetchedAt(kind: QueueKind): number | undefined {
   return times.every((time): time is number => time != null) ? Math.min(...times) : undefined;
 }
 
-/** Merged searches cost a few seconds each, so they only run once the Merged tab has been opened. */
-function isMergedInUse(): boolean {
-  return state.kind === 'merged' || searches.has(mergedKey());
+/** Merged and reviewed searches cost seconds each, so they only run once their tab has been opened. */
+function isInUse(kind: QueueKind): boolean {
+  if (kind === 'merged') return state.kind === kind || searches.has(mergedKey());
+  if (kind === 'reviews') return state.kind === kind || searches.has(reviewsKey());
+  return true;
 }
 
 function requestedPulls(): PullRequest[] {
@@ -2216,6 +2334,8 @@ function deriveQueue(kind: QueueKind): PullRequest[] {
       return searchPulls('reviewed').filter((pull) => verdictOf(pull.activity.reviews, viewer) === 'APPROVED');
     case 'merged':
       return searchPulls(mergedKey());
+    case 'reviews':
+      return reviewedPulls(searchPulls(reviewsKey()));
     case 'turn': {
       const seen = new Set<string>();
       return [...requestedPulls(), ...searchPulls('mine'), ...searchPulls('reviewed')].filter((pull) => !seen.has(pull.id) && seen.add(pull.id) != null && turnFor(pull)?.whose === 'mine');
@@ -2235,7 +2355,7 @@ function publishQueues(kinds: readonly QueueKind[]): void {
     if (fetchedAt(kind) == null) continue;
     const pulls = deriveQueue(kind).map(withMergeState);
     queueCache.set(kind, pulls);
-    if (kind !== 'merged') published.push(...pulls);
+    if (!isHistory(kind)) published.push(...pulls);
     if (kind === state.kind) applyQueue(pulls);
   }
   renderCounts();
@@ -2244,13 +2364,22 @@ function publishQueues(kinds: readonly QueueKind[]): void {
 
 function persistSearches(): void {
   try {
-    const kept = [...searches].filter(([key]) => !key.startsWith(MERGED_PREFIX) || key === mergedKey());
+    const kept = [...searches].filter(([key]) => (!key.startsWith(MERGED_PREFIX) || key === mergedKey()) && (!key.startsWith(REVIEWS_PREFIX) || (key === reviewsKey() && cachedReviewsFit())));
     const live = new Set(kept.flatMap(([, entry]) => entry.pulls.map((pull) => pull.id)));
     const mergeStates = Object.fromEntries([...mergeStateCache].filter(([id]) => live.has(id)));
     localStorage.setItem(SEARCH_CACHE_KEY, JSON.stringify({ viewer, teams: viewerTeams == null ? null : [...viewerTeams], searches: Object.fromEntries(kept), mergeStates }));
   } catch (error) {
     console.warn('could not cache queues', errorMessage(error));
   }
+}
+
+let reviewsSizeChecked: { pulls: PullRequest[]; fits: boolean } | null = null;
+
+/** Whether the current reviewed search is small enough to keep; measured once per result. */
+function cachedReviewsFit(): boolean {
+  const pulls = searchPulls(reviewsKey());
+  if (reviewsSizeChecked?.pulls !== pulls) reviewsSizeChecked = { pulls, fits: JSON.stringify(pulls).length <= MAX_CACHED_REVIEWS_CHARS };
+  return reviewsSizeChecked.fits;
 }
 
 interface SearchCache {
@@ -2270,7 +2399,7 @@ function hydrateSearches(): void {
     viewerTeams = cached.teams == null ? null : new Set(cached.teams);
     Object.entries(cached.mergeStates).forEach(([id, entry]) => mergeStateCache.set(id, entry));
     for (const [key, entry] of Object.entries(cached.searches)) {
-      const isKnown = (SEARCH_KINDS as readonly string[]).includes(key) || key === mergedKey();
+      const isKnown = (SEARCH_KINDS as readonly string[]).includes(key) || key === mergedKey() || key === reviewsKey();
       // Caches from before labels were fetched hold none; the refresh at start fills them in.
       if (isKnown && Array.isArray(entry.pulls) && entry.pulls.every((pull) => pull.activity != null && Array.isArray(pull.failingChecks))) searches.set(key, { ...entry, pulls: entry.pulls.map((pull) => (Array.isArray(pull.labels) ? pull : { ...pull, labels: [] })) });
     }
@@ -2314,11 +2443,11 @@ function followUp(ids: readonly string[]): void {
   }
 }
 
-/** Refreshes running, by tab; Merged by its current filters, so changing them starts a new one. */
+/** Refreshes running, by tab; Merged and Reviews by their current filters, so changing them starts a new one. */
 const inFlight = new Map<string, Promise<void>>();
 
 function flightKey(kind: QueueKind): string {
-  return kind === 'merged' ? mergedKey() : kind;
+  return kind === 'merged' ? mergedKey() : kind === 'reviews' ? reviewsKey() : kind;
 }
 const MIN_REFRESH_GAP_MS = 20_000;
 /** Refreshes the user asked for. Background syncs show no spinner unless a tab has nothing to show yet. */
@@ -2683,7 +2812,7 @@ async function runMerge(pull: PullRequest, isQueued: boolean): Promise<string | 
 }
 
 async function bulkMerge(): Promise<void> {
-  const pulls = checkedPulls().filter((pull) => pull.mergedAt == null && !pull.isDraft && pull.mergeable !== 'CONFLICTING' && !leaving.has(pull.id));
+  const pulls = checkedPulls().filter((pull) => isOpen(pull) && !pull.isDraft && pull.mergeable !== 'CONFLICTING' && !leaving.has(pull.id));
   if (pulls.length === 0) return;
   const queueFlags = await Promise.all(pulls.map(usesMergeQueue));
   const isAllQueued = queueFlags.every(Boolean);
@@ -2750,7 +2879,7 @@ async function approveNow(pulls: readonly PullRequest[]): Promise<string[]> {
 }
 
 async function bulkApprove(): Promise<void> {
-  const checked = checkedPulls().filter((pull) => pull.mergedAt == null);
+  const checked = checkedPulls().filter(isOpen);
   const pulls = checked.filter((pull) => !isOwnPull(pull));
   if (pulls.length === 0) {
     if (checked.length > 0) toast('You can’t approve your own pull requests', true);
@@ -3177,7 +3306,7 @@ const COMMANDS: Command[] = [
   { id: 'ask-me', section: 'Filter', title: 'Only me: hide PRs here only because my team was asked', aliases: 'direct personal mine review requests scope', keys: ['⌥6'], run: () => setAskScope('me') },
   { id: 'ask-team', section: 'Filter', title: 'Only team: review requests to my teams', aliases: 'team group codeowners engineering scope', keys: ['⌥7'], run: () => setAskScope('team') },
   { id: 'smart-attention', section: 'Filter', title: 'Show PRs that need attention', aliases: 'unapproved conflicts failing blocked red yellow triage', keys: ['⌥4'], run: () => setSmartFilter('attention') },
-  { id: 'filters', section: 'Filter', title: 'What to show: requests, state, repository (period and author on Merged)', aliases: 'filter selector slice scope repo period author', keys: ['⇧f'], run: openSliceMenu },
+  { id: 'filters', section: 'Filter', title: 'What to show: requests, state, repository (period and author on Merged, period and reviewer on Reviews)', aliases: 'filter selector slice scope repo period author', keys: ['⇧f'], run: openSliceMenu },
   { id: 'labels', section: 'Filter', title: 'Filter by label (any of the chosen ones)', aliases: 'label labels tag tags', keys: ['⇧l'], run: openLabelMenu },
   { id: 'group', section: 'Filter', title: 'Group related work', aliases: 'cluster effort category batch smart group', keys: ['⇧t'], run: toggleGrouping },
   { id: 'regroup', section: 'Filter', title: 'Regroup', aliases: 'refresh groups cluster', keys: [], run: () => { groupsSignature = ''; localStorage.removeItem(GROUPS_CACHE_KEY); void ensureGroups(true); } },
@@ -3199,6 +3328,7 @@ const COMMANDS: Command[] = [
   { id: 'view-mine', section: 'Views', title: 'Go to Created by me', keys: ['⌘3', 'g m'], run: () => switchKind('mine') },
   { id: 'view-approved', section: 'Views', title: 'Go to Approved by me', keys: ['⌘5', 'g a'], run: () => switchKind('approved') },
   { id: 'view-merged', section: 'Views', title: 'Go to Merged', aliases: 'history shipped done closed', keys: ['⌘6', 'g d'], run: () => switchKind('merged') },
+  { id: 'view-reviews', section: 'Views', title: 'Go to Reviews', aliases: 'reviewers leaderboard who reviewed most stats', keys: ['⌘7', 'g v'], run: () => switchKind('reviews') },
 
   { id: 'toggle-sidebar', section: 'Layout', title: 'Toggle pull request list', aliases: 'hide show pane sidebar navigation queue inbox', keys: ['⌘b', '⌘\\'], run: () => layout.toggle('list') },
   { id: 'layout-review', section: 'Layout', title: 'Layout: review (list 24% · description 36% · diff)', aliases: 'preset pane default balanced', keys: ['1', '⌘⌥1'], run: () => applyLayoutPreset('review') },
@@ -3415,7 +3545,7 @@ dom.approve.addEventListener('click', () => void approveSelected());
 dom.merge.addEventListener('click', () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()));
 /** Syncs every tab; searches they share are fetched once, and ones fetched in the last 20s are reused. */
 function syncAll(): void {
-  QUEUE_KINDS.filter((kind) => kind !== 'merged' || isMergedInUse()).forEach((kind) => void refresh(kind));
+  QUEUE_KINDS.filter(isInUse).forEach((kind) => void refresh(kind));
 }
 window.addEventListener('focus', syncAll);
 document.addEventListener('visibilitychange', () => {
@@ -3461,7 +3591,7 @@ let restartIntoUpdate: (() => void) | null = null;
 
 hydrateSearches();
 if (state.pulls.length === 0) renderBootSkeletons();
-QUEUE_KINDS.filter((kind) => kind !== 'merged' || isMergedInUse()).forEach((kind) => void refresh(kind, true));
+QUEUE_KINDS.filter(isInUse).forEach((kind) => void refresh(kind, true));
 
 if (import.meta.env.VITE_PR_REVIEW_HARNESS === '1') {
   Object.assign(window, {
