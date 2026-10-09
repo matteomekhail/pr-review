@@ -1,5 +1,5 @@
 import { glideScrollBy, glideScrollTo, prefersReducedMotion } from './motion';
-import { CodeView, parsePatchFiles, type CodeViewDiffItem, type FileDiffLoadedFiles, type FileDiffMetadata } from '@pierre/diffs';
+import { CodeView, parsePatchFiles, type CodeViewDiffItem, type DiffLineAnnotation, type FileDiffLoadedFiles, type FileDiffMetadata, type SelectedLineRange } from '@pierre/diffs';
 import { getOrCreateWorkerPoolSingleton } from '@pierre/diffs/worker';
 import DiffWorker from '@pierre/diffs/worker/worker.js?worker';
 import { oldContents } from './hidden-lines';
@@ -21,13 +21,23 @@ export interface ParsedFile {
 /** The file's contents at the pull request's head, by path. */
 export type HeadFileLoader = (path: string) => Promise<string>;
 
+/** What sits under a line: a key the owner renders from. Keep the object for as long as its content is unchanged, so the element is reused. */
+export interface AnnotationRef {
+  key: string;
+}
+
+export type DiffAnnotation = DiffLineAnnotation<AnnotationRef>;
+
 interface DiffViewCallbacks {
   onToggle(id: string, isCollapsed: boolean): void;
   /** A right-click on an "unmodified lines" separator, at these viewport coordinates. */
   onSeparatorMenu(x: number, y: number): void;
+  /** The gutter "+" was clicked (or dragged over several lines) in this file. */
+  onCommentLines(path: string, range: SelectedLineRange): void;
+  renderAnnotation(ref: AnnotationRef): HTMLElement | undefined;
 }
 
-type ViewOptions = NonNullable<ConstructorParameters<typeof CodeView<undefined, undefined>>[0]>;
+type ViewOptions = NonNullable<ConstructorParameters<typeof CodeView<AnnotationRef, undefined>>[0]>;
 
 const WORKER_COUNT = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 2));
 const LARGE_FILE_LINES = 1500;
@@ -76,7 +86,7 @@ function chevron(id: string, isCollapsed: boolean): HTMLElement {
 }
 
 export class DiffView {
-  private readonly view: CodeView<undefined, undefined>;
+  private readonly view: CodeView<AnnotationRef, undefined>;
   private readonly root: HTMLElement;
   private readonly callbacks: DiffViewCallbacks;
   private header: HTMLElement | undefined;
@@ -88,12 +98,14 @@ export class DiffView {
   private collapsed = new Set<string>();
   private ids: string[] = [];
   private readonly headFiles = new WeakMap<FileDiffMetadata, HeadFileLoader>();
+  private annotations = new Map<string, DiffAnnotation[]>();
+  private paths = new Map<string, string>();
 
   constructor(root: HTMLElement, diffStyle: DiffStyle, callbacks: DiffViewCallbacks) {
     this.root = root;
     this.diffStyle = diffStyle;
     this.callbacks = callbacks;
-    this.view = new CodeView<undefined, undefined>(this.options(), workerPool);
+    this.view = new CodeView<AnnotationRef, undefined>(this.options(), workerPool);
     this.view.setup(root);
     root.addEventListener('click', this.handleHeaderClick);
     root.addEventListener('contextmenu', this.handleContextMenu);
@@ -109,8 +121,27 @@ export class DiffView {
     if (loadHeadFile != null) files.forEach((file) => this.headFiles.set(file.diff, loadHeadFile));
     this.ids = files.map((file) => file.id);
     this.collapsed = new Set(files.filter((file) => file.startsCollapsed).map((file) => file.id));
-    this.view.setItems(files.map((file): CodeViewDiffItem => ({ id: file.id, type: 'diff', fileDiff: file.diff, collapsed: this.collapsed.has(file.id) })));
+    this.paths = new Map(files.map((file) => [file.id, file.diff.name]));
+    this.view.setItems(files.map((file): CodeViewDiffItem<AnnotationRef> => ({ id: file.id, type: 'diff', fileDiff: file.diff, collapsed: this.collapsed.has(file.id), annotations: this.annotations.get(file.diff.name) })));
     this.root.scrollTop = 0;
+  }
+
+  /** Comment threads and drafts, by file path; only files whose list changed are re-rendered. */
+  setAnnotations(byPath: Map<string, DiffAnnotation[]>): void {
+    const previous = this.annotations;
+    this.annotations = byPath;
+    for (const [id, path] of this.paths) {
+      const before = previous.get(path) ?? [];
+      const after = byPath.get(path) ?? [];
+      if (before.length === after.length && before.every((annotation, index) => annotation.metadata === after[index]?.metadata && annotation.lineNumber === after[index]?.lineNumber && annotation.side === after[index]?.side)) continue;
+      const item = this.view.getItem(id);
+      if (item?.type === 'diff') this.view.updateItem({ ...item, annotations: after, version: (item.version ?? 0) + 1 });
+    }
+  }
+
+  /** The lines the gutter "+" highlighted stay marked while their comment is written; this lets them go. */
+  clearSelection(): void {
+    this.view.clearSelectedLines();
   }
 
   isCollapsed(id: string): boolean {
@@ -207,6 +238,12 @@ export class DiffView {
       layout: { paddingTop: 0, paddingBottom: 320, gap: this.isFlush ? 0 : 10 },
       renderCodeViewHeader: header == null ? undefined : () => header,
       renderHeaderPrefix: (_fileDiff, context) => chevron(context.item.id, this.collapsed.has(context.item.id)),
+      enableGutterUtility: true,
+      onGutterUtilityClick: (range, context) => {
+        const path = this.paths.get(context.item.id);
+        if (path != null) this.callbacks.onCommentLines(path, range);
+      },
+      renderAnnotation: (annotation) => (annotation.metadata == null ? undefined : this.callbacks.renderAnnotation(annotation.metadata)),
     };
   }
 

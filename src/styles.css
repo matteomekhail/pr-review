@@ -600,6 +600,39 @@ diffs-container { --diffs-dark-bg: var(--bg); --diffs-light-bg: var(--bg); }
 .file.active, :root[data-theme=light] .file.active { background: color-mix(in srgb, var(--accent) 20%, var(--bg)); color: var(--text); }
 #comment-dialog { width: 600px; max-width: 90vw; }
 #expand-dialog { width: 340px; }
+/* Code comments: threads in the conversation and under diff lines, and the comment box the gutter "+" opens. */
+.review-threads { display: flex; flex-direction: column; gap: 8px; padding: 0 12px 12px; }
+.comment:not(:has(.comment-body)) .review-threads { padding-top: 12px; }
+.diff-annotation { padding: 8px 12px 10px; font: 13px/1.5 "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif; white-space: normal; color: var(--text-2); -webkit-user-select: text; user-select: text; }
+.diff-annotation > * { max-width: 760px; }
+.diff-annotation > * + * { margin-top: 8px; }
+.thread { border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-elev); overflow: hidden; }
+.thread-head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 12px; font-size: 12px; color: var(--text-3); border-bottom: 1px solid var(--border-soft); }
+.thread-head code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--text-2); }
+.thread-head span { flex: none; }
+.thread-tag { flex: none; font-size: 10.5px; font-weight: 500; color: var(--text-3); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; line-height: 16px; }
+.thread-hunk { margin: 0; padding: 6px 0; font: 12px/19px 'Berkeley Mono', 'SF Mono', ui-monospace, monospace; color: var(--text-3); background: var(--bg); border-bottom: 1px solid var(--border-soft); overflow-x: auto; }
+.thread-hunk span { display: block; padding: 0 12px; white-space: pre; }
+.thread-hunk .add { background: color-mix(in srgb, var(--ok) 10%, transparent); color: var(--text-2); }
+.thread-hunk .del { background: color-mix(in srgb, var(--bad) 10%, transparent); color: var(--text-2); }
+.thread-comment { padding: 8px 12px; }
+.thread-comment + .thread-comment { border-top: 1px solid var(--border-soft); }
+.thread-comment > header { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); margin-bottom: 3px; }
+.thread-comment > header b { color: var(--text); font-weight: 600; }
+.thread-comment > header .comment-time { margin-left: auto; }
+.thread-body { font-size: 13px; }
+.thread-body > :last-child { margin-bottom: 0; }
+.thread-reply { padding: 8px 12px; border-top: 1px solid var(--border-soft); }
+.thread-reply-open { width: 100%; height: 28px; padding: 0 10px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--bg); color: var(--text-4); font-size: 12.5px; text-align: left; cursor: text; }
+.thread-reply-open:hover { border-color: var(--border); color: var(--text-3); }
+details.thread > summary { display: flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 12px; color: var(--text-3); cursor: pointer; list-style: none; }
+details.thread > summary::-webkit-details-marker { display: none; }
+details.thread[open] > summary { border-bottom: 1px solid var(--border-soft); }
+.diff-annotation > .inline-composer { padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-elev); }
+.inline-composer textarea { display: block; width: 100%; box-sizing: border-box; min-height: 72px; max-height: 40vh; resize: vertical; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: 13px/1.5 "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif; outline: none; }
+.inline-composer textarea:focus { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+.composer-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; }
+.composer-foot .muted { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #expand-input { width: 100%; box-sizing: border-box; height: 34px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: 13px "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-variant-numeric: tabular-nums; outline: none; }
 #expand-input { appearance: textfield; }
 #expand-input::-webkit-inner-spin-button, #expand-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }

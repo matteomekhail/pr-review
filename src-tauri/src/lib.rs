@@ -267,7 +267,7 @@ async fn pulls(ids: Vec<String>) -> Result<String, String> {
 async fn conversation(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
-    let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 50) { totalCount nodes { id bodyHTML createdAt url author { login avatarUrl __typename } } } reviews(last: 30) { totalCount nodes { id state bodyHTML submittedAt url author { login avatarUrl __typename } comments { totalCount } } } } } }";
+    let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 50) { totalCount nodes { id bodyHTML createdAt url author { login avatarUrl __typename } } } reviews(last: 30) { totalCount nodes { id state bodyHTML submittedAt url author { login avatarUrl __typename } comments { totalCount } } } reviewThreads(first: 100) { nodes { id isResolved isOutdated path line startLine originalLine diffSide comments(first: 50) { nodes { id databaseId bodyHTML createdAt url diffHunk author { login avatarUrl __typename } pullRequestReview { id } } } } } } } }";
     gh(&[
         "api", "graphql",
         "-f", &format!("query={query}"),
@@ -367,6 +367,56 @@ async fn file_at(repo: String, rev: String, path: String) -> Result<String, Stri
     gh(&["api", &endpoint, "-H", "Accept: application/vnd.github.raw"]).await
 }
 
+fn check_comment_body(body: &str) -> Result<(), String> {
+    if body.trim().is_empty() || body.len() > MAX_COMMENT_BYTES {
+        return Err("comment must be between 1 and 65000 bytes".to_string());
+    }
+    Ok(())
+}
+
+fn diff_side(side: &str) -> Result<&'static str, String> {
+    match side {
+        "LEFT" => Ok("LEFT"),
+        "RIGHT" => Ok("RIGHT"),
+        _ => Err(format!("invalid diff side: {side}")),
+    }
+}
+
+/// A review comment on one line, or on `start_line..=line`, published at once (GitHub's "Add single comment").
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn line_comment(repo: String, number: u64, commit: String, path: String, line: u64, side: String, start_line: Option<u64>, start_side: Option<String>, body: String) -> Result<String, String> {
+    validate_repo(&repo)?;
+    check_comment_body(&body)?;
+    contents_path(&path)?;
+    if !is_commit_sha(&commit) {
+        return Err(format!("invalid commit: {commit}"));
+    }
+    let endpoint = format!("repos/{repo}/pulls/{number}/comments");
+    let mut args = vec![
+        "api".to_string(), endpoint, "-X".to_string(), "POST".to_string(),
+        "-f".to_string(), format!("body={body}"),
+        "-f".to_string(), format!("commit_id={commit}"),
+        "-f".to_string(), format!("path={path}"),
+        "-F".to_string(), format!("line={line}"),
+        "-f".to_string(), format!("side={}", diff_side(&side)?),
+    ];
+    if let Some(start) = start_line.filter(|start| *start < line) {
+        args.extend(["-F".to_string(), format!("start_line={start}"), "-f".to_string(), format!("start_side={}", diff_side(start_side.as_deref().unwrap_or(&side))?)]);
+    }
+    args.extend(["--jq".to_string(), ".html_url".to_string()]);
+    gh(&args.iter().map(String::as_str).collect::<Vec<_>>()).await.map(|url| url.trim().to_string())
+}
+
+/// A reply in the thread that review comment `comment_id` started.
+#[tauri::command]
+async fn reply_comment(repo: String, number: u64, comment_id: u64, body: String) -> Result<String, String> {
+    validate_repo(&repo)?;
+    check_comment_body(&body)?;
+    let endpoint = format!("repos/{repo}/pulls/{number}/comments/{comment_id}/replies");
+    gh(&["api", &endpoint, "-X", "POST", "-f", &format!("body={body}"), "--jq", ".html_url"]).await.map(|url| url.trim().to_string())
+}
+
 #[tauri::command]
 async fn approve(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
@@ -378,9 +428,7 @@ const MAX_COMMENT_BYTES: usize = 65_000;
 #[tauri::command]
 async fn comment(repo: String, number: u64, body: String) -> Result<String, String> {
     validate_repo(&repo)?;
-    if body.trim().is_empty() || body.len() > MAX_COMMENT_BYTES {
-        return Err("comment must be between 1 and 65000 bytes".to_string());
-    }
+    check_comment_body(&body)?;
     let path = format!("repos/{repo}/issues/{number}/comments");
     gh(&["api", &path, "-X", "POST", "-f", &format!("body={body}"), "--jq", ".html_url"]).await.map(|url| url.trim().to_string())
 }
@@ -549,7 +597,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, merged, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, file_at, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, merged, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, file_at, line_comment, reply_comment, approve, merge, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }

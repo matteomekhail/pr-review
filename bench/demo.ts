@@ -133,15 +133,55 @@ export function demoBody(pull: FixturePull): string {
 <p>Preview: <a href="https://pr-4812.preview.acme.dev/search">https://pr-4812.preview.acme.dev/search</a></p>`;
 }
 
+const JORDAN = { login: 'jordan-lee', avatarUrl: '', __typename: 'User' };
+const SAM = { login: 'sam-rivera', avatarUrl: '', __typename: 'User' };
+
+interface DemoThreadComment { id: string; databaseId: number; bodyHTML: string; createdAt: string; url: string; diffHunk: string; author: typeof JORDAN; pullRequestReview: { id: string } }
+interface DemoThread { id: string; isResolved: boolean; isOutdated: boolean; path: string; line: number | null; startLine: number | null; originalLine: number | null; diffSide: 'LEFT' | 'RIGHT'; comments: { nodes: DemoThreadComment[] } }
+
+const USE_SEARCH_HUNK = '@@ -8,11 +8,15 @@ export function useSearch(input: string): SearchState {\n   const [results, setResults] = useState<Score[]>([]);\n \n   useEffect(() => {\n-    semanticSearch(input).then(setResults);\n+    let isCurrent = true;';
+
+/** Code threads on the featured PR, kept here so the harness can add comments and replies the way GitHub would. */
+export const DEMO_THREADS: DemoThread[] = [
+  { id: 'T1', isResolved: false, isOutdated: false, path: 'src/search/useSearch.ts', line: 11, startLine: null, originalLine: 11, diffSide: 'RIGHT', comments: { nodes: [
+    { id: 'TC1', databaseId: 1001, bodyHTML: '<p>Could this flag live in a ref? The effect re-runs on every keystroke.</p>', createdAt: new Date(DEMO_NOW - 0.18 * 3_600_000).toISOString(), url: 'https://github.com/acme/web/pull/4812#discussion_r1001', diffHunk: USE_SEARCH_HUNK, author: JORDAN, pullRequestReview: { id: 'r1' } },
+    { id: 'TC2', databaseId: 1002, bodyHTML: '<p>It has to be per run, so a ref would leak between queries. Leaving it.</p>', createdAt: new Date(DEMO_NOW - 0.12 * 3_600_000).toISOString(), url: 'https://github.com/acme/web/pull/4812#discussion_r1002', diffHunk: USE_SEARCH_HUNK, author: SAM, pullRequestReview: { id: 'r2' } },
+  ] } },
+  { id: 'T2', isResolved: true, isOutdated: false, path: 'src/search/semantic.ts', line: 4, startLine: null, originalLine: 4, diffSide: 'RIGHT', comments: { nodes: [
+    { id: 'TC3', databaseId: 1003, bodyHTML: '<p>Export this so the test can use it.</p>', createdAt: new Date(DEMO_NOW - 0.17 * 3_600_000).toISOString(), url: 'https://github.com/acme/web/pull/4812#discussion_r1003', diffHunk: '@@ -1,18 +1,34 @@\n import { fetchScores } from \'./api\';\n+export const SEARCH_DEBOUNCE_MS = 180;', author: JORDAN, pullRequestReview: { id: 'r1' } },
+  ] } },
+  { id: 'T3', isResolved: false, isOutdated: true, path: 'src/search/semantic.ts', line: null, startLine: null, originalLine: 9, diffSide: 'RIGHT', comments: { nodes: [
+    { id: 'TC4', databaseId: 1004, bodyHTML: '<p>Nit: early return reads better here.</p>', createdAt: new Date(DEMO_NOW - 0.16 * 3_600_000).toISOString(), url: 'https://github.com/acme/web/pull/4812#discussion_r1004', diffHunk: '@@ -1,18 +1,34 @@\n-  if (query.trim() === \'\') return [];', author: JORDAN, pullRequestReview: { id: 'r1' } },
+  ] } },
+];
+
+let demoCommentId = 2000;
+
+export function addDemoComment(path: string, line: number, side: 'LEFT' | 'RIGHT', startLine: number | null, body: string): string {
+  const id = demoCommentId++;
+  DEMO_THREADS.push({ id: `T${id}`, isResolved: false, isOutdated: false, path, line, startLine, originalLine: line, diffSide: side, comments: { nodes: [{ id: `TC${id}`, databaseId: id, bodyHTML: `<p>${body.replace(/[&<>]/g, '')}</p>`, createdAt: new Date().toISOString(), url: `https://github.com/acme/web/pull/4812#discussion_r${id}`, diffHunk: '', author: JORDAN, pullRequestReview: { id: `R${id}` } }] } });
+  return `https://github.com/acme/web/pull/4812#discussion_r${id}`;
+}
+
+export function addDemoReply(commentId: number, body: string): string {
+  const thread = DEMO_THREADS.find((candidate) => candidate.comments.nodes[0]?.databaseId === commentId);
+  if (thread == null) throw new Error('Not Found (HTTP 404)');
+  const id = demoCommentId++;
+  thread.comments.nodes.push({ id: `TC${id}`, databaseId: id, bodyHTML: `<p>${body.replace(/[&<>]/g, '')}</p>`, createdAt: new Date().toISOString(), url: `https://github.com/acme/web/pull/4812#discussion_r${id}`, diffHunk: '', author: JORDAN, pullRequestReview: { id: `R${id}` } });
+  return `https://github.com/acme/web/pull/4812#discussion_r${id}`;
+}
+
 export function demoConversation(pull: FixturePull): unknown {
   const nodes = !isFeatured(pull) ? [] : [
     { id: 'd1', bodyHTML: '<h3>🚀 Web preview deployed</h3><p><a href="https://pr-4812.preview.acme.dev">https://pr-4812.preview.acme.dev</a></p>', createdAt: new Date(DEMO_NOW - 0.25 * 3_600_000).toISOString(), url: `${pull.url}#issuecomment-1`, author: { login: 'github-actions', avatarUrl: '', __typename: 'Bot' } },
     { id: 'd2', bodyHTML: '<p>Nice, the abort handling reads cleanly. One nit: can we export the 180 ms as <code>SEARCH_DEBOUNCE_MS</code> so the test does not hard-code it?</p>', createdAt: new Date(DEMO_NOW - 0.2 * 3_600_000).toISOString(), url: `${pull.url}#issuecomment-2`, author: { login: 'jordan-lee', avatarUrl: '', __typename: 'User' } },
   ];
   const reviews = !isFeatured(pull) ? [] : [
-    { id: 'r1', state: 'APPROVED', bodyHTML: '<p>Verified locally on Slow 3G; one request per pause and no stale results. Approving.</p>', submittedAt: new Date(DEMO_NOW - 0.15 * 3_600_000).toISOString(), url: `${pull.url}#pullrequestreview-1`, author: { login: 'jordan-lee', avatarUrl: '', __typename: 'User' }, comments: { totalCount: 0 } },
+    { id: 'r1', state: 'APPROVED', bodyHTML: '<p>Verified locally on Slow 3G; one request per pause and no stale results. Approving.</p>', submittedAt: new Date(DEMO_NOW - 0.15 * 3_600_000).toISOString(), url: `${pull.url}#pullrequestreview-1`, author: { login: 'jordan-lee', avatarUrl: '', __typename: 'User' }, comments: { totalCount: 3 } },
+    // Sam's reply in T1: a review of its own on GitHub, with no body.
+    { id: 'r2', state: 'COMMENTED', bodyHTML: '', submittedAt: new Date(DEMO_NOW - 0.12 * 3_600_000).toISOString(), url: `${pull.url}#pullrequestreview-2`, author: SAM, comments: { totalCount: 1 } },
   ];
-  return { data: { repository: { pullRequest: { comments: { totalCount: nodes.length, nodes }, reviews: { totalCount: reviews.length, nodes: reviews } } } } };
+  return { data: { repository: { pullRequest: { comments: { totalCount: nodes.length, nodes }, reviews: { totalCount: reviews.length, nodes: reviews }, reviewThreads: { nodes: isFeatured(pull) ? DEMO_THREADS : [] } } } } };
 }
 
 export function demoDiff(pull: FixturePull): string | null {

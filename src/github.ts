@@ -246,6 +246,24 @@ export function commentOnPull(pull: PullRequest, body: string): Promise<string> 
   return invoke<string>('comment', { repo: pull.repository.nameWithOwner, number: pull.number, body });
 }
 
+/** Where a code comment goes: `line` (or `startLine..line`) on the new side (RIGHT) or the old side (LEFT). */
+export interface LineTarget {
+  path: string;
+  line: number;
+  side: 'LEFT' | 'RIGHT';
+  startLine?: number;
+  startSide?: 'LEFT' | 'RIGHT';
+}
+
+/** A review comment published at once, against the head commit the diff was read from. */
+export function commentOnLines(pull: PullRequest, target: LineTarget, body: string): Promise<string> {
+  return invoke<string>('line_comment', { repo: pull.repository.nameWithOwner, number: pull.number, commit: pull.headRefOid, path: target.path, line: target.line, side: target.side, startLine: target.startLine ?? null, startSide: target.startSide ?? null, body });
+}
+
+export function replyToThread(pull: PullRequest, commentId: number, body: string): Promise<string> {
+  return invoke<string>('reply_comment', { repo: pull.repository.nameWithOwner, number: pull.number, commentId, body });
+}
+
 export function approvePull(pull: PullRequest): Promise<string> {
   return invoke<string>('approve', { repo: pull.repository.nameWithOwner, number: pull.number });
 }

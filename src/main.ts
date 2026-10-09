@@ -8,8 +8,10 @@ import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, de
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, commentOnPull, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
-import { DiffView, parseDiff, type DiffStyle, type ExpandLines, type ParsedFile } from './diffs';
+import { approvePull, commentOnLines, commentOnPull, replyToThread, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
+import type { SelectedLineRange } from '@pierre/diffs';
+import { DiffView, parseDiff, type AnnotationRef, type DiffAnnotation, type DiffStyle, type ExpandLines, type ParsedFile } from './diffs';
+import { composerHtml, threadHtml } from './inline-comments';
 import { hasHiddenLines } from './hidden-lines';
 import { cancelFullFilePrefetch, fullFile, prefetchFullFiles } from './full-files';
 import { sanitizeHtml } from './sanitize';
@@ -23,7 +25,7 @@ import { imageUrlsInHtml, preloadImages } from './image-cache';
 import { routeLinksToBrowser } from './external-links';
 import { isSemanticMatch, semanticMatches } from './semantic-search';
 import { VirtualList, type VirtualRow } from './virtual-list';
-import { invalidateConversation, loadConversation, type ConversationItem } from './conversation';
+import { invalidateConversation, loadConversation, loadThreads, type ConversationItem, type ReviewThread } from './conversation';
 import { isReady, isRecent, isSmall, matchesSmartFilter, sortPulls, type SmartFilter, type SortOrder } from './smart';
 import { assessReadiness, isReadinessAvailable, type ReadinessResult } from './readiness';
 import { computeTurn, type Turn } from './turn';
@@ -159,7 +161,12 @@ let viewerTeams: Set<string> | null = null;
 const diffCache = new Map<string, Promise<ParsedFile[]>>();
 const queueCache = new Map<QueueKind, PullRequest[]>();
 let isSelectedQueued = false;
-const diffView = new DiffView(dom.diffRoot, state.diffStyle, { onToggle: (id, isCollapsed) => markFileCollapsed(id, isCollapsed), onSeparatorMenu: (x, y) => openExpandMenu(x, y) });
+const diffView = new DiffView(dom.diffRoot, state.diffStyle, {
+  onToggle: (id, isCollapsed) => markFileCollapsed(id, isCollapsed),
+  onSeparatorMenu: (x, y) => openExpandMenu(x, y),
+  onCommentLines: (path, range) => startLineComment(path, range),
+  renderAnnotation: (ref) => renderAnnotation(ref),
+});
 diffView.setExpandLines(state.expandLines);
 let currentFiles: ParsedFile[] = [];
 let renderToken = 0;
@@ -1062,8 +1069,9 @@ function conversationItemHtml(item: ConversationItem): string {
   const review = item.reviewState == null ? null : REVIEW_LABELS[item.reviewState] ?? { label: item.reviewState.toLowerCase(), tone: 'muted' };
   const avatarHtml = item.avatarUrl == null ? '<span class="avatar"></span>' : `<img class="avatar" src="${escapeHtml(item.avatarUrl)}&s=48" alt="" loading="lazy" />`;
   const action = review == null ? 'commented' : `<span class="review-state tone-${review.tone}">${review.label}</span>`;
-  const inline = item.inlineCount > 0 ? `<span class="muted">· ${item.inlineCount} inline comment${item.inlineCount === 1 ? '' : 's'}</span>` : '';
-  const body = item.html.trim() === '' ? '' : `<div class="markdown comment-body">${sanitizeHtml(item.html)}</div>`;
+  const inline = item.inlineCount > 0 && item.threads.length === 0 ? `<span class="muted">· ${item.inlineCount} inline comment${item.inlineCount === 1 ? '' : 's'}</span>` : '';
+  const threads = item.threads.length === 0 ? '' : `<div class="review-threads">${item.threads.map((thread) => threadHtml(thread, { withContext: true, ago: relativeTime })).join('')}</div>`;
+  const body = `${item.html.trim() === '' ? '' : `<div class="markdown comment-body">${sanitizeHtml(item.html)}</div>`}${threads}`;
   return `<article class="comment${item.isBot ? ' is-bot' : ''}${review != null ? ` review tone-${review.tone}` : ''}">
     <header>${avatarHtml}<b>${escapeHtml(item.author)}</b>${item.isBot ? '<span class="bot-tag">bot</span>' : ''}${action}${inline}<a class="comment-time" href="${escapeHtml(item.url)}" title="Open on GitHub">${relativeTime(item.at)} ago</a></header>
     ${body}
@@ -1245,6 +1253,207 @@ function syncQueueState(pull: PullRequest): void {
 
 /** The conversation on screen, so the bot toggle and background updates re-render what is current. */
 let shownConversation: ConversationItem[] = [];
+let shownDescription: HTMLElement | null = null;
+
+/** Fills the description's conversation and puts the code threads under their lines in the diff. */
+function showConversation(pull: PullRequest, description: HTMLElement): void {
+  const token = renderToken;
+  void loadConversation(pull).then(
+    (items) => {
+      if (token !== renderToken) return;
+      const section = description.querySelector('[data-conversation]');
+      if (section == null) return;
+      shownConversation = items;
+      renderConversation(section, items);
+    },
+    (error: unknown) => {
+      if (token !== renderToken) return;
+      const list = description.querySelector('.conversation-list');
+      if (list != null) list.innerHTML = `<p class="error">Could not load comments: ${escapeHtml(errorMessage(error))}</p>`;
+      retryDetail(pull);
+    },
+  );
+  void loadThreads(pull).then(
+    (threads) => {
+      if (token !== renderToken) return;
+      setShownThreads(pull, threads);
+    },
+    () => undefined,
+  );
+}
+
+/** After posting: the conversation and the threads again, without rebuilding the description. */
+function refreshConversation(pull: PullRequest): void {
+  invalidateConversation(pull);
+  if (shownDescription != null && selectedPull()?.id === pull.id) showConversation(pull, shownDescription);
+}
+
+// --- Code comments: threads under their lines, and drafts from the gutter "+" ---
+
+interface LineDraft {
+  key: string;
+  pullId: string;
+  path: string;
+  side: 'additions' | 'deletions';
+  line: number;
+  startLine: number | null;
+  startSide: 'additions' | 'deletions';
+}
+
+const lineDrafts = new Map<string, LineDraft>();
+const annotationRefs = new Map<string, AnnotationRef>();
+const annotationElements = new Map<string, HTMLElement>();
+let shownThreads: { pullId: string; threads: ReviewThread[] } = { pullId: '', threads: [] };
+
+/** A thread's key changes with its content, so a new reply or a resolve renders it afresh. */
+function threadKey(thread: ReviewThread): string {
+  return `thread:${thread.id}:${thread.comments.length}:${thread.isResolved}`;
+}
+
+function annotationRef(key: string): AnnotationRef {
+  const existing = annotationRefs.get(key);
+  if (existing != null) return existing;
+  const ref = { key };
+  annotationRefs.set(key, ref);
+  return ref;
+}
+
+function setShownThreads(pull: PullRequest, threads: ReviewThread[]): void {
+  if (shownThreads.pullId !== pull.id) {
+    [...annotationElements.keys()].filter((key) => key.startsWith('thread:')).forEach((key) => annotationElements.delete(key));
+  }
+  shownThreads = { pullId: pull.id, threads };
+  syncAnnotations(pull);
+}
+
+/** Open threads on current lines, then this PR's drafts; outdated threads only show in the conversation. */
+function syncAnnotations(pull: PullRequest): void {
+  const byPath = new Map<string, DiffAnnotation[]>();
+  const add = (path: string, annotation: DiffAnnotation): void => void byPath.set(path, [...(byPath.get(path) ?? []), annotation]);
+  const threads = shownThreads.pullId === pull.id ? shownThreads.threads : [];
+  threads.forEach((thread) => {
+    if (thread.line != null && !thread.isOutdated) add(thread.path, { side: thread.side, lineNumber: thread.line, metadata: annotationRef(threadKey(thread)) });
+  });
+  lineDrafts.forEach((draft) => {
+    if (draft.pullId === pull.id) add(draft.path, { side: draft.side, lineNumber: draft.line, metadata: annotationRef(draft.key) });
+  });
+  diffView.setAnnotations(byPath);
+}
+
+function draftLabel(draft: LineDraft): string {
+  const sign = draft.side === 'deletions' ? '−' : '+';
+  return draft.startLine == null ? `Line ${sign}${draft.line}` : `Lines ${draft.startSide === 'deletions' ? '−' : '+'}${draft.startLine} to ${sign}${draft.line}`;
+}
+
+function focusComposer(element: Element | undefined | null): void {
+  requestAnimationFrame(() => element?.querySelector<HTMLTextAreaElement>('.inline-composer textarea')?.focus({ preventScroll: true }));
+}
+
+/** The gutter "+": one line, or the lines it was dragged over. A second click on the same line returns to its draft. */
+function startLineComment(path: string, range: SelectedLineRange): void {
+  const pull = selectedPull();
+  if (pull == null) return;
+  const from = { line: range.start, side: range.side ?? 'additions' };
+  const to = { line: range.end, side: range.endSide ?? range.side ?? 'additions' };
+  const [first, last] = from.line <= to.line ? [from, to] : [to, from];
+  const key = `draft:${pull.id}:${path}:${last.side}:${last.line}`;
+  if (!lineDrafts.has(key)) lineDrafts.set(key, { key, pullId: pull.id, path, side: last.side, line: last.line, startLine: first.line === last.line && first.side === last.side ? null : first.line, startSide: first.side });
+  syncAnnotations(pull);
+  focusComposer(annotationElements.get(key));
+}
+
+function renderAnnotation(ref: AnnotationRef): HTMLElement | undefined {
+  const cached = annotationElements.get(ref.key);
+  if (cached != null) return cached;
+  const element = document.createElement('div');
+  element.className = 'diff-annotation';
+  const draft = lineDrafts.get(ref.key);
+  if (draft != null) {
+    element.dataset.draft = draft.key;
+    element.innerHTML = composerHtml(draftLabel(draft), 'Comment');
+    focusComposer(element);
+  } else {
+    const thread = shownThreads.threads.find((candidate) => threadKey(candidate) === ref.key);
+    if (thread == null) return undefined;
+    element.innerHTML = threadHtml(thread, { withContext: false, ago: relativeTime });
+  }
+  annotationElements.set(ref.key, element);
+  return element;
+}
+
+function dropDraft(key: string): void {
+  lineDrafts.delete(key);
+  annotationElements.delete(key);
+  annotationRefs.delete(key);
+  diffView.clearSelection();
+  const pull = selectedPull();
+  if (pull != null) syncAnnotations(pull);
+}
+
+/** GitHub takes code comments only on lines the diff shows (not on lines opened from "unmodified lines"). */
+function codeCommentError(error: unknown): string {
+  const message = errorMessage(error);
+  return /part of the diff|could not be resolved|422/i.test(message) ? 'GitHub only takes comments on lines that are part of the diff' : message;
+}
+
+function closeReply(composer: HTMLElement): void {
+  const reply = composer.closest<HTMLElement>('.thread-reply');
+  const thread = composer.closest<HTMLElement>('[data-thread]');
+  if (reply == null || thread == null) return;
+  reply.innerHTML = `<button type="button" class="thread-reply-open" data-reply-thread="${escapeHtml(thread.dataset.thread ?? '')}">Reply…</button>`;
+}
+
+function cancelComposer(composer: HTMLElement): void {
+  const draftKey = composer.closest<HTMLElement>('.diff-annotation[data-draft]')?.dataset.draft;
+  if (draftKey != null) dropDraft(draftKey);
+  else closeReply(composer);
+}
+
+async function submitComposer(composer: HTMLElement): Promise<void> {
+  const pull = selectedPull();
+  const textarea = composer.querySelector<HTMLTextAreaElement>('textarea');
+  const submit = composer.querySelector<HTMLButtonElement>('[data-composer-submit]');
+  const body = textarea?.value.trim() ?? '';
+  if (pull == null || textarea == null || submit == null || body === '' || submit.disabled) return;
+  submit.disabled = true;
+  try {
+    const draftKey = composer.closest<HTMLElement>('.diff-annotation[data-draft]')?.dataset.draft;
+    const draft = draftKey == null ? undefined : lineDrafts.get(draftKey);
+    if (draft != null) {
+      const side = (value: LineDraft['side']): 'LEFT' | 'RIGHT' => (value === 'deletions' ? 'LEFT' : 'RIGHT');
+      await commentOnLines(pull, { path: draft.path, line: draft.line, side: side(draft.side), startLine: draft.startLine ?? undefined, startSide: draft.startLine == null ? undefined : side(draft.startSide) }, body);
+      dropDraft(draft.key);
+      toast(`Commented on ${draft.path.split('/').pop() ?? draft.path}:${draft.line}`);
+    } else {
+      const threadId = composer.closest<HTMLElement>('[data-thread]')?.dataset.thread;
+      const root = shownThreads.threads.find((thread) => thread.id === threadId)?.comments[0];
+      if (root == null) throw new Error('This thread is no longer loaded; refresh and try again');
+      await replyToThread(pull, root.databaseId, body);
+      closeReply(composer);
+      toast('Replied');
+    }
+    refreshConversation(pull);
+  } catch (error) {
+    toast(codeCommentError(error), true);
+    submit.disabled = false;
+  }
+}
+
+document.addEventListener('click', (event) => {
+  const target = event.target as HTMLElement;
+  const open = target.closest<HTMLElement>('[data-reply-thread]');
+  if (open != null) {
+    const reply = open.closest<HTMLElement>('.thread-reply');
+    if (reply == null) return;
+    reply.innerHTML = composerHtml('Reply', 'Reply');
+    focusComposer(reply);
+    return;
+  }
+  const composer = target.closest<HTMLElement>('.inline-composer');
+  if (composer == null) return;
+  if (target.closest('[data-composer-cancel]') != null) cancelComposer(composer);
+  else if (target.closest('[data-composer-submit]') != null) void submitComposer(composer);
+});
 
 /** The open PR changed without new code: its header and conversation update in place, and the diff keeps its scroll. */
 function refreshOpenPull(pull: PullRequest, previous: PullRequest): void {
@@ -1276,28 +1485,16 @@ function renderDetail(pull: PullRequest): void {
     dom.descPane.replaceChildren();
     diffView.setHeader(description);
   }
+  shownDescription = description;
+  const section = description.querySelector('[data-conversation]');
+  section?.addEventListener('click', (event) => {
+    if ((event.target as HTMLElement).closest('[data-toggle-bots]') == null) return;
+    showBotComments = !showBotComments;
+    localStorage.setItem('showBotComments', showBotComments ? '1' : '0');
+    renderConversation(section, shownConversation);
+  });
+  showConversation(pull, description);
   const token = renderToken;
-  void loadConversation(pull).then(
-    (items) => {
-      if (token !== renderToken) return;
-      const section = description.querySelector('[data-conversation]');
-      if (section == null) return;
-      shownConversation = items;
-      renderConversation(section, items);
-      section.addEventListener('click', (event) => {
-        if ((event.target as HTMLElement).closest('[data-toggle-bots]') == null) return;
-        showBotComments = !showBotComments;
-        localStorage.setItem('showBotComments', showBotComments ? '1' : '0');
-        renderConversation(section, shownConversation);
-      });
-    },
-    (error: unknown) => {
-      if (token !== renderToken) return;
-      const list = description.querySelector('.conversation-list');
-      if (list != null) list.innerHTML = `<p class="error">Could not load comments: ${escapeHtml(errorMessage(error))}</p>`;
-      retryDetail(pull);
-    },
-  );
   void loadBody(pull, true).then(
     (bodyHtml) => {
       if (token !== renderToken) return;
@@ -1438,6 +1635,7 @@ async function renderSelection(pull: PullRequest): Promise<void> {
   dom.pr.hidden = false;
   currentFiles = [];
   diffView.show([]);
+  syncAnnotations(pull);
   renderDetail(pull);
   const diffPromise = loadDiff(pull);
   let isSettled = false;
@@ -2840,6 +3038,18 @@ function handleSequence(event: KeyboardEvent): boolean {
 document.addEventListener('keydown', (event) => {
   if ((event.isComposing && !event.altKey) || sliceMenu.isOpen || sortMenu.isOpen || labelMenu.isOpen || expandMenu.isOpen || dom.expandDialog.open || lightbox.isOpen || dom.confirm.open || dom.help.open || dom.bulkConfirm.open || dom.triage.open || themePicker.isOpen || dom.commentDialog.open) return;
   const target = event.target;
+  const composer = target instanceof HTMLTextAreaElement ? target.closest<HTMLElement>('.inline-composer') : null;
+  if (composer != null && target instanceof HTMLTextAreaElement) {
+    if (event.key === 'Enter' && event.metaKey) {
+      event.preventDefault();
+      void submitComposer(composer);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      if (target.value.trim() === '') cancelComposer(composer);
+      else target.blur();
+    }
+    return;
+  }
   const isTyping = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || (target instanceof HTMLElement && target.isContentEditable);
   if (isTyping && (event.key === 'Escape' || (event.key === 'Enter' && !event.metaKey))) {
     if (event.key === 'Escape' && target === dom.filter && dom.filter.value !== '' && filteredPulls().length === 0) {

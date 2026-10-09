@@ -1,4 +1,4 @@
-import { DEMO_CONFLICTS, DEMO_PULLS, DEMO_TEAMS, DEMO_VIEWER, demoBody, demoConversation, demoDiff } from '../demo';
+import { DEMO_CONFLICTS, DEMO_PULLS, DEMO_TEAMS, DEMO_VIEWER, addDemoComment, addDemoReply, demoBody, demoConversation, demoDiff } from '../demo';
 import { generateBody, generateDiff, generatePulls, type FixturePull } from '../fixtures';
 import { parsePatchFiles } from '@pierre/diffs';
 
@@ -63,6 +63,12 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     { id: 'c3', bodyHTML: '<h3>🚀 Web Preview Deployed</h3><p><a href="https://pr-47520.preview.acme.dev">https://pr-47520.preview.acme.dev</a></p>', createdAt: '2026-09-26T11:30:00Z', url: 'https://github.com/o/web/pull/1#c3', author: { login: 'github-actions', avatarUrl: '', __typename: 'Bot' } },
     { id: 'c2', bodyHTML: '<p>Tracking issue: <a href="https://github.com/acme/web/issues/4801">acme/web#4801</a></p>', createdAt: '2026-09-26T11:00:00Z', url: 'https://github.com/o/web/pull/1#c2', author: { login: 'ci-helper', avatarUrl: '', __typename: 'Bot' } },
   ] }, reviews: { totalCount: 0, nodes: [] } } } } }),
+  // Like GitHub: a comment on a line outside every hunk is refused.
+  line_comment: (args) => {
+    if (new URLSearchParams(location.search).has('failLineComment')) throw new Error('gh: Validation Failed (HTTP 422) pull_request_review_thread.line must be part of the diff');
+    return addDemoComment(String(args.path), Number(args.line), args.side === 'LEFT' ? 'LEFT' : 'RIGHT', args.startLine == null ? null : Number(args.startLine), String(args.body));
+  },
+  reply_comment: (args) => addDemoReply(Number(args.commentId), String(args.body)),
   viewer: () => (IS_DEMO ? DEMO_VIEWER : 'someone-else'),
   viewer_teams: () => (IS_DEMO ? DEMO_TEAMS.join('\n') : ''),
   comment: (args) => `https://github.com/${String(args.repo)}/pull/${String(args.number)}#issuecomment-1`,
