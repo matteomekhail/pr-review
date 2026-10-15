@@ -33,6 +33,16 @@ const MERGED_FIELDS: &str = r#"
 }"#;
 const MERGED_PAGE_SIZE: u64 = 100;
 
+/// Team lists everyone's PRs, too many to fetch in full each sync. Its search returns only what tells a PR changed:
+/// the last update, and the CI state (a check finishing does not touch `updatedAt`). Changed PRs are then fetched in
+/// full with `pulls`. A 100-PR page of this costs about 2 points, where a full 25-PR page costs about 45.
+const TEAM_INDEX_FIELDS: &str = r#"
+... on PullRequest {
+  id updatedAt
+  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+}"#;
+const TEAM_PAGE_SIZE: u64 = 100;
+
 /// Reviewed searches need who reviewed when, and like merged ones skip checks, merge state and the review decision.
 /// A 100-PR page with its reviews takes about 5s alone and can pass GitHub's 10s limit beside others, so pages hold 50.
 const REVIEWED_FIELDS: &str = r#"
@@ -272,7 +282,7 @@ async fn merged(since: String, orgs: Vec<String>, author: Option<String>, expect
     serde_json::to_string(&pages).map_err(|error| error.to_string())
 }
 
-/// Open, ready-for-review PRs in `repos` updated since `since` (ISO 8601): everyone's work, for the Team view.
+/// An index of the open, ready-for-review PRs in `repos` updated since `since` (ISO 8601): everyone's work, for Team.
 #[tauri::command]
 async fn team(repos: Vec<String>, since: String, expected: Option<u64>) -> Result<String, String> {
     if repos.is_empty() || repos.len() > 10 || !is_search_date(&since) {
@@ -282,9 +292,9 @@ async fn team(repos: Vec<String>, since: String, expected: Option<u64>) -> Resul
     let scope = repos.iter().map(|repo| format!("repo:{repo}")).collect::<Vec<_>>().join(" ");
     let q = format!("is:pr is:open archived:false draft:false updated:>={since} {scope} sort:updated-desc");
     let query = format!(
-        "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {QUEUE_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_FIELDS} }} }} }}"
+        "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {TEAM_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {TEAM_INDEX_FIELDS} }} }} }}"
     );
-    let pages = search_pages(query, q, expected.unwrap_or(0), QUEUE_PAGE_SIZE).await?;
+    let pages = search_pages(query, q, expected.unwrap_or(0), TEAM_PAGE_SIZE).await?;
     serde_json::to_string(&pages).map_err(|error| error.to_string())
 }
 

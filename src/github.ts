@@ -200,9 +200,32 @@ export async function fetchMerged(since: string, orgs: readonly string[], author
   return parsePages(await invoke<string>('merged', { since, orgs, author, expected }));
 }
 
-/** Everyone's open, ready-for-review PRs in `repos` updated since `since` (ISO 8601). */
-export async function fetchTeam(repos: readonly string[], since: string, expected = 0): Promise<SearchResult> {
-  return parsePages(await invoke<string>('team', { repos, since, expected }));
+/** What tells a team PR changed since it was last fetched in full. */
+export interface TeamIndexEntry {
+  id: string;
+  updatedAt: string;
+  checkState: CheckState | null;
+}
+
+interface TeamIndexPage {
+  data?: { search: { issueCount?: number; nodes: ({ id?: string; updatedAt?: string; commits?: { nodes: { commit: { statusCheckRollup: { state: CheckState } | null } }[] } } | null)[] } };
+  errors?: { message: string }[];
+}
+
+/** Everyone's open, ready-for-review PRs in `repos` updated since `since` (ISO 8601), as a light index; see `fetchPulls` for the rest. */
+export async function fetchTeamIndex(repos: readonly string[], since: string, expected = 0): Promise<TeamIndexEntry[]> {
+  const parsed: TeamIndexPage | TeamIndexPage[] = JSON.parse(await invoke<string>('team', { repos, since, expected }));
+  const pages = Array.isArray(parsed) ? parsed : [parsed];
+  const failed = pages.find((page) => page.data == null);
+  if (failed != null) throw new Error(failed.errors?.map((error) => error.message).join('; ') ?? 'Empty response');
+  const seen = new Set<string>();
+  return pages.flatMap((page) =>
+    (page.data?.search.nodes ?? []).flatMap((node) => {
+      if (node?.id == null || node.updatedAt == null || seen.has(node.id)) return [];
+      seen.add(node.id);
+      return [{ id: node.id, updatedAt: node.updatedAt, checkState: node.commits?.nodes[0]?.commit.statusCheckRollup?.state ?? null }];
+    }),
+  );
 }
 
 /**

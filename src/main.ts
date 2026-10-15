@@ -8,7 +8,7 @@ import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, de
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, commentOnLines, commentOnPull, replyToThread, resolveThread, submitReview, type ReviewCommentInput, type ReviewEvent, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, fetchReviewed, fetchTeam, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
+import { approvePull, commentOnLines, commentOnPull, replyToThread, resolveThread, submitReview, type ReviewCommentInput, type ReviewEvent, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, fetchReviewed, fetchTeamIndex, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
 import type { SelectedLineRange } from '@pierre/diffs';
 import { DiffView, parseDiff, type AnnotationRef, type DiffAnnotation, type DiffStyle, type ExpandLines, type ParsedFile } from './diffs';
 import { composerHtml, pendingHtml, replyRowHtml, threadHtml } from './inline-comments';
@@ -2477,12 +2477,33 @@ function teamRepos(): string[] {
   return [...counts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 10).map(([repo]) => repo);
 }
 
-/** Team searches the repositories of my queues, so on a first launch it waits for them. */
+/** PRs fetched in full per request, and requests in flight at once. */
+const TEAM_BATCH = 25;
+const TEAM_BATCHES_IN_FLIGHT = 3;
+
+/**
+ * Team searches the repositories of my queues, so on a first launch it waits for them. The search returns a light
+ * index; only PRs that are new or changed since the last fetch are fetched in full, which keeps a team of hundreds of
+ * PRs well inside GitHub's rate limit.
+ */
 async function fetchTeamSearch(expected: number): Promise<SearchResult> {
   if (teamRepos().length === 0) await Promise.allSettled(SEARCH_KINDS.map((kind) => searchesInFlight.get(kind)));
   const repos = teamRepos();
+  if (repos.length === 0) return { pulls: [], total: 0 };
   const since = new Date(Date.now() - TEAM_DAYS * 86_400_000).toISOString().slice(0, 10);
-  return repos.length === 0 ? { pulls: [], total: 0 } : fetchTeam(repos, since, expected);
+  const index = await fetchTeamIndex(repos, since, expected);
+  const known = new Map(searchPulls(TEAM_KEY).map((pull) => [pull.id, pull]));
+  const stale = index.filter((entry) => {
+    const pull = known.get(entry.id);
+    return pull == null || pull.updatedAt !== entry.updatedAt || pull.checkState !== entry.checkState;
+  });
+  const batches = Array.from({ length: Math.ceil(stale.length / TEAM_BATCH) }, (_, at) => stale.slice(at * TEAM_BATCH, (at + 1) * TEAM_BATCH).map((entry) => entry.id));
+  for (let at = 0; at < batches.length; at += TEAM_BATCHES_IN_FLIGHT) {
+    const fetched = await Promise.all(batches.slice(at, at + TEAM_BATCHES_IN_FLIGHT).map((ids) => fetchPulls(ids)));
+    fetched.flat().forEach((pull) => known.set(pull.id, pull));
+  }
+  const pulls = index.flatMap((entry) => known.get(entry.id) ?? []);
+  return { pulls, total: pulls.length };
 }
 
 function fetchSearch(key: string, expected: number): Promise<SearchResult> {
