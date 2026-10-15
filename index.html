@@ -11,26 +11,31 @@
       <section id="list-pane">
         <header class="pane-head drag-region" data-tauri-drag-region>
           <div class="head-title" data-tauri-drag-region>
-            <h2 id="view-title" data-tauri-drag-region>Mine</h2>
+            <h2 id="view-title" data-tauri-drag-region>My turn</h2>
             <button id="slice-button" class="slice-button" aria-haspopup="menu" aria-expanded="false" title="What to show  ⇧F"><span class="slice-label">All</span><span class="slice-count"></span><i data-icon="chevronDown"></i></button>
             <span class="head-spacer" data-tauri-drag-region></span>
             <button id="update-pill" class="update-pill" hidden title="Restart to update  ⌘⇧U"><i data-icon="refresh"></i>Update</button>
-            <button id="fix-button" class="icon-button" title="Copy an agent prompt for unready PRs  ⇧X"><i data-icon="sparkles"></i></button>
-            <button id="label-button" class="icon-button" aria-haspopup="menu" aria-expanded="false" aria-pressed="false" title="Filter by label  ⇧L"><i data-icon="tag"></i></button>
-            <button id="group-button" class="icon-button" aria-pressed="false" title="Group related work  ⇧T"><i data-icon="group"></i></button>
-            <button id="sort-button" class="icon-button" aria-haspopup="menu" aria-expanded="false" title="Sort  ⇧S"><i data-icon="sort"></i></button>
+            <button id="fix-button" class="tool-button" title="Prompt an agent to fix unready PRs  ⇧X"><i data-icon="sparkles"></i><span>Fix prompt</span></button>
             <button id="refresh-button" class="icon-button refresh-button" title="Refresh  ⌘R"><i data-icon="refresh"></i></button>
           </div>
         </header>
+        <div class="list-tools">
+          <div class="search"><i data-icon="search"></i><input id="filter" title="Filter by title, author, branch or number  /" placeholder="Filter" spellcheck="false" autocomplete="off" /><kbd>/</kbd></div>
+          <button id="label-button" class="tool-button" aria-haspopup="menu" aria-expanded="false" aria-pressed="false" title="Filter by label  ⇧L"><i data-icon="tag"></i><span>Label</span></button>
+          <button id="group-button" class="tool-button" aria-pressed="false" title="Group related work  ⇧T"><i data-icon="group"></i><span>Group</span></button>
+          <button id="sort-button" class="tool-button" aria-haspopup="menu" aria-expanded="false" title="Sort  ⇧S"><i data-icon="sort"></i><span>Sort</span></button>
+          <button id="help-button" class="icon-button help-button" aria-haspopup="dialog" title="Keys and marks  ?"><span aria-hidden="true">?</span></button>
+        </div>
         <div class="list-body">
           <nav class="rail" aria-label="Views">
-            <button data-kind="turn" title="My turn: where the next move is yours  ⌘4"><i data-icon="circleDot"></i><span class="count" data-count="turn"></span></button>
-            <button data-kind="review" title="Review requested  ⌘1"><i data-icon="eye"></i><span class="count" data-count="review"></span></button>
-            <button data-kind="mine" class="active" title="Created by me  ⌘3"><i data-icon="user"></i><span class="count" data-count="mine"></span></button>
-            <button data-kind="involved" title="Involved  ⌘2"><i data-icon="users"></i><span class="count" data-count="involved"></span></button>
-            <button data-kind="approved" title="Approved by me  ⌘5"><i data-icon="circleCheck"></i><span class="count" data-count="approved"></span></button>
-            <button data-kind="merged" title="Merged, by period and author  ⌘6"><i data-icon="merge"></i><span class="count"></span></button>
-            <button data-kind="reviews" title="Reviews, by period and reviewer  ⌘7"><i data-icon="userCheck"></i><span class="count"></span></button>
+            <button data-kind="turn" class="active" title="My turn: the next move is yours  ⌘1"><span class="rail-icon"><i data-icon="circleDot"></i><span class="count" data-count="turn"></span></span><span class="rail-label">My turn</span></button>
+            <button data-kind="review" title="Review requested from you or your team  ⌘2"><span class="rail-icon"><i data-icon="eye"></i><span class="count" data-count="review"></span></span><span class="rail-label">Review</span></button>
+            <button data-kind="mine" title="Created by me  ⌘3"><span class="rail-icon"><i data-icon="user"></i><span class="count" data-count="mine"></span></span><span class="rail-label">Mine</span></button>
+            <button data-kind="involved" title="Involved: you commented, were mentioned or assigned  ⌘4"><span class="rail-icon"><i data-icon="users"></i><span class="count" data-count="involved"></span></span><span class="rail-label">Involved</span></button>
+            <hr class="rail-divider" />
+            <button data-kind="approved" title="Approved by me  ⌘5"><span class="rail-icon"><i data-icon="circleCheck"></i><span class="count" data-count="approved"></span></span><span class="rail-label">Approved</span></button>
+            <button data-kind="merged" title="Merged, by period and author  ⌘6"><span class="rail-icon"><i data-icon="merge"></i></span><span class="rail-label">Merged</span></button>
+            <button data-kind="reviews" title="Reviews, by period and reviewer  ⌘7"><span class="rail-icon"><i data-icon="userCheck"></i></span><span class="rail-label">Reviews</span></button>
           </nav>
           <div class="list-column">
             <ol id="pr-list"></ol>
@@ -51,6 +56,7 @@
 
       <main id="detail">
         <div id="empty" class="empty is-loading" data-tauri-drag-region><div class="boot-skeleton" aria-label="Loading pull requests" aria-busy="true"></div></div>
+        <section id="welcome" class="welcome" hidden></section>
         <section id="pr" hidden>
           <header id="pr-head" class="drag-region" data-tauri-drag-region>
             <div class="head-left" data-tauri-drag-region>
@@ -60,8 +66,6 @@
               <div class="crumbs" id="crumbs" data-tauri-drag-region></div>
             </div>
             <div class="actions">
-              <button id="theme-button" class="ghost icon-action theme-button" title="Theme  T"><i data-icon="theme"></i><kbd class="icon-kbd">T</kbd></button>
-              <div class="search"><i data-icon="search"></i><input id="filter" title="Filter pull requests  /" placeholder="Filter" spellcheck="false" autocomplete="off" /><kbd>/</kbd></div>
               <button id="comment-button" class="ghost icon-action" title="Write a comment  C"><i data-icon="comment"></i><kbd class="icon-kbd">C</kbd></button>
               <button id="approve" class="ghost icon-action" title="Approve  A"><i data-icon="check"></i><kbd class="icon-kbd">A</kbd></button>
               <button id="merge" class="primary merge-icon" title="Squash and merge  ⌘↵"></button>
@@ -169,7 +173,7 @@
 
     <dialog id="help">
       <form method="dialog">
-        <div class="dialog-title">Keyboard shortcuts</div>
+        <div class="dialog-title">Keys and marks</div>
         <div id="shortcut-list" class="shortcut-list"></div>
         <menu><button value="close" class="ghost">Close <kbd>esc</kbd></button></menu>
       </form>

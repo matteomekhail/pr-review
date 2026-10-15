@@ -140,7 +140,7 @@ try {
   await fc.assert(
     fc.asyncProperty(fc.commands(commands, { maxCommands: STEPS }), async (sequence) => {
       await page.goto(`${server.url}/?pulls=60`);
-      await page.evaluate(() => { localStorage.clear(); localStorage.setItem('smartFilter', 'all'); });
+      await page.evaluate(() => { localStorage.clear(); localStorage.setItem('smartFilter', 'all'); localStorage.setItem('welcomeDismissed', '1'); });
       await page.reload();
       await page.waitForFunction(() => document.querySelectorAll('#pr-list li[data-id]').length > 0);
       const initial = await snapshot(page);

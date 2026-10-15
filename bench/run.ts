@@ -113,6 +113,7 @@ async function runOnce(url: string): Promise<ScenarioResult[]> {
   await page.addInitScript(() => {
     localStorage.setItem('smartFilter', 'all');
     localStorage.setItem('themeId', 'dark');
+    localStorage.setItem('welcomeDismissed', '1');
     Object.assign(window, { __longTasks: 0 });
     new PerformanceObserver((list) => Object.assign(window, { __longTasks: (window as unknown as { __longTasks: number }).__longTasks + list.getEntries().length })).observe({ type: 'longtask', buffered: true });
   });
