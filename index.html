@@ -58,7 +58,16 @@
       <main id="detail">
         <div id="empty" class="empty is-loading" data-tauri-drag-region><div class="boot-skeleton" aria-label="Loading pull requests" aria-busy="true"></div></div>
         <section id="welcome" class="welcome" hidden></section>
-        <section id="team" class="team" hidden></section>
+        <section id="team" class="team" hidden>
+          <header class="team-head drag-region" data-tauri-drag-region>
+            <h2 data-tauri-drag-region>Team</h2>
+            <nav id="team-tabs" class="team-repos"></nav>
+            <span class="grow" data-tauri-drag-region></span>
+            <div class="search team-search"><i data-icon="search"></i><input id="team-filter" title="Filter by title, author, branch or number  /" placeholder="Filter" spellcheck="false" autocomplete="off" /><kbd>/</kbd></div>
+            <span id="team-updated" class="muted"></span>
+          </header>
+          <div id="team-view" class="team-view"></div>
+        </section>
         <section id="pr" hidden>
           <header id="pr-head" class="drag-region" data-tauri-drag-region>
             <div class="head-left" data-tauri-drag-region>

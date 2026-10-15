@@ -236,11 +236,10 @@ export interface TeamViewInput {
   /** Narrows everything to one repository (`owner/name`); empty for all. */
   repo: string;
   selectedId: string | null;
-  updatedAt: number | undefined;
 }
 
-/** The Team dashboard: four figures, every open PR grouped by whether it moves, and who and what holds them up. */
-export function teamHtml({ pulls, now, person, repo, selectedId, updatedAt }: TeamViewInput, parts: RowParts): string {
+/** The Team dashboard, in two parts: the header's repository tabs and person filter, and the body below the header. */
+export function teamView({ pulls, now, person, repo, selectedId }: TeamViewInput, parts: RowParts): { tabs: string; body: string } {
   const everyone = teamRows(pulls, now);
   const all = repo === '' ? everyone : everyone.filter((row) => row.pull.repository.nameWithOwner === repo);
   const rows = person === '' ? all : all.filter((row) => row.holder.who.includes(person));
@@ -257,14 +256,8 @@ export function teamHtml({ pulls, now, person, repo, selectedId, updatedAt }: Te
     if (inGroup.length === 0) return [];
     return [`<li class="team-group"><b>${GROUP_TITLES[group]}</b><span class="n">${inGroup.length}</span><span class="note">${groupNote(inGroup)}</span></li>`, ...inGroup.map((row) => rowHtml(row, now, selectedId, parts))];
   });
-  return `<header class="team-head drag-region" data-tauri-drag-region>
-      <h2>Team</h2>
-      <nav class="team-repos">${repoTabs.join('')}</nav>
-      ${person === '' ? '' : `<button class="team-filter" data-person="">Waiting on ${parts.escape(person)}<span aria-hidden="true">×</span></button>`}
-      <span class="grow" data-tauri-drag-region></span>
-      <span class="muted">${updatedAt == null ? 'Loading…' : `Updated ${duration(now - updatedAt)} ago`}</span>
-    </header>
-    <div class="team-figures">
+  const tabs = `${repoTabs.join('')}${person === '' ? '' : `<button class="team-filter" data-person="">Waiting on ${parts.escape(person)}<span aria-hidden="true">×</span></button>`}`;
+  const body = `<div class="team-figures">
       ${figure(String(all.length), 'open')}
       ${figure(String(stuck), 'stuck over 24h', stuck > 0 ? 'bad' : '')}
       ${figure(String(ready), 'ready to merge', ready > 0 ? 'ok' : '')}
@@ -273,7 +266,7 @@ export function teamHtml({ pulls, now, person, repo, selectedId, updatedAt }: Te
     <div class="team-body">
       <section class="team-table${new Set(rows.map((row) => row.pull.repository.nameWithOwner)).size > 1 ? '' : ' one-repo'}">
         <div class="team-cols"><span class="repo">Repo</span><span class="t">Pull request</span><span class="author">Author</span><span class="age">Age</span><span class="team-size">Size</span><span class="ci">CI</span><span class="people">Reviewers</span><span class="bot-marks">AI</span><span class="team-holder">Waiting on</span><span class="idle">Idle</span></div>
-        <ol>${groups.join('') || '<li class="team-empty">No open pull requests.</li>'}</ol>
+        <ol>${groups.join('') || '<li class="team-empty">No pull requests match.</li>'}</ol>
       </section>
       <aside class="team-side">
         <h3>Reviewer load</h3>
@@ -282,4 +275,5 @@ export function teamHtml({ pulls, now, person, repo, selectedId, updatedAt }: Te
         ${failingChecksHtml(failingChecks(all), parts)}
       </aside>
     </div>`;
+  return { tabs, body };
 }
