@@ -922,11 +922,9 @@ kbd[data-glyph='backspace'] { --kbd-glyph: url("data:image/svg+xml,%3Csvg%20xmln
 .rail .ico { width: 16px; height: 16px; }
 .rail .count { height: 11px; font-size: 10px; line-height: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 
-:is(#pr-list, .row-sample) li[data-id] { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; column-gap: 9px; height: 52px; padding: 8px 12px 0; }
-:is(#pr-list, .row-sample) li .lead { position: relative; width: 16px; height: 18px; display: grid; place-items: center; }
-:is(#pr-list, .row-sample) li .lead .check-box { position: absolute; top: 2px; left: 1px; display: none; opacity: 1; }
-:is(#pr-list, .row-sample) li:hover .lead .check-box, #pr-list.selecting .lead .check-box, :is(#pr-list, .row-sample) li.checked .lead .check-box { display: grid; }
-:is(#pr-list, .row-sample) li:hover .lead .status, #pr-list.selecting .lead .status, :is(#pr-list, .row-sample) li.checked .lead .status { visibility: hidden; }
+/* The select box has its own slot before the status, so hovering a row never hides why it is red. */
+:is(#pr-list, .row-sample) li[data-id] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 9px; height: 52px; padding: 8px 12px 0 7px; }
+:is(#pr-list, .row-sample) li .lead { height: 18px; display: flex; align-items: center; gap: 6px; }
 :is(#pr-list, .row-sample) .row-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 :is(#pr-list, .row-sample) .row-top { display: flex; align-items: center; gap: 8px; min-width: 0; height: 18px; }
 :is(#pr-list, .row-sample) .row-top .t { flex: 1; min-width: 0; font-size: 13px; }
