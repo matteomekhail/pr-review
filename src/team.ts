@@ -271,8 +271,8 @@ export function teamHtml({ pulls, now, person, repo, selectedId, updatedAt }: Te
       ${figure(firstReview == null ? '–' : duration(firstReview), 'to first review, median')}
     </div>
     <div class="team-body">
-      <section class="team-table">
-        <div class="team-cols"><span></span><span>Repo</span><span></span><span>Pull request</span><span>Author</span><span>Age</span><span>Size</span><span>CI</span><span>Reviewers</span><span>AI</span><span>Waiting on</span><span>Idle</span></div>
+      <section class="team-table${new Set(rows.map((row) => row.pull.repository.nameWithOwner)).size > 1 ? '' : ' one-repo'}">
+        <div class="team-cols"><span class="repo">Repo</span><span class="t">Pull request</span><span class="author">Author</span><span class="age">Age</span><span class="team-size">Size</span><span class="ci">CI</span><span class="people">Reviewers</span><span class="bot-marks">AI</span><span class="team-holder">Waiting on</span><span class="idle">Idle</span></div>
         <ol>${groups.join('') || '<li class="team-empty">No open pull requests.</li>'}</ol>
       </section>
       <aside class="team-side">
