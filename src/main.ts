@@ -36,7 +36,7 @@ import { PopoverMenu, type MenuSection } from './menu';
 import { authorCounts, MERGED_PERIODS, mergedSince, type MergedPeriod } from './merged';
 import { lastReviewAt, reviewerCounts, reviewsSince } from './reviews';
 import { botReviews, describeBotReview, REVIEW_BOTS } from './review-bots';
-import { teamHtml } from './team';
+import { duration, teamView } from './team';
 
 interface State {
   kind: QueueKind;
@@ -83,6 +83,10 @@ const dom = {
   viewTitle: element('view-title'),
   welcome: element('welcome'),
   team: element('team'),
+  teamTabs: element('team-tabs'),
+  teamView: element('team-view'),
+  teamFilter: element<HTMLInputElement>('team-filter'),
+  teamUpdated: element('team-updated'),
   empty: element('empty'),
   pr: element('pr'),
   crumbs: element('crumbs'),
@@ -1179,11 +1183,29 @@ let teamRenderKey = '';
 function renderTeam(): void {
   const now = Date.now();
   const updatedAt = fetchedAt('team');
-  const key = [objectId(state.pulls), teamPerson, state.repoFilter, state.selectedId, updatedAt, Math.floor(now / 60_000)].join('|');
+  const needle = state.filter.trim().toLowerCase();
+  const key = [objectId(state.pulls), needle, objectId(semanticScores), teamPerson, state.repoFilter, state.selectedId, updatedAt, Math.floor(now / 60_000)].join('|');
   if (key === teamRenderKey) return;
   teamRenderKey = key;
-  dom.team.innerHTML = teamHtml({ pulls: state.pulls, now, person: teamPerson, repo: state.repoFilter, selectedId: state.selectedId, updatedAt }, { status: statusIcon, bots: botMarks, escape: escapeHtml });
+  if (dom.teamFilter.value !== state.filter) dom.teamFilter.value = state.filter;
+  const view = teamView({ pulls: state.pulls.filter((pull) => matchesText(pull, needle)), now, person: teamPerson, repo: state.repoFilter, selectedId: state.selectedId }, { status: statusIcon, bots: botMarks, escape: escapeHtml });
+  dom.teamTabs.innerHTML = view.tabs;
+  dom.teamView.innerHTML = view.body;
+  dom.teamUpdated.textContent = updatedAt == null ? 'Loading…' : `Updated ${duration(now - updatedAt)} ago`;
 }
+
+/** The dashboard's filter is the list's: typing in either narrows both, so a PR opened from Team keeps the same list. */
+dom.teamFilter.addEventListener('input', () => {
+  dom.filter.value = dom.teamFilter.value;
+  dom.filter.dispatchEvent(new Event('input'));
+});
+dom.teamFilter.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  event.stopPropagation();
+  if (dom.teamFilter.value === '') return dom.teamFilter.blur();
+  dom.teamFilter.value = '';
+  dom.teamFilter.dispatchEvent(new Event('input'));
+});
 
 /** A PR's body and diff start loading when the pointer rests on its row, so opening it is instant. */
 let teamHoverTimer = 0;
@@ -3534,7 +3556,7 @@ const DIFF_SCROLL_COMMANDS: Command[] = [
 const COMMANDS: Command[] = [
   { id: 'update', section: 'General', title: 'Check for updates / restart into update', aliases: 'upgrade version release', keys: ['⌘⇧u'], run: () => (restartIntoUpdate != null ? restartIntoUpdate() : (toast('Checking for updates…'), checkForUpdates())) },
   { id: 'help', section: 'General', title: 'Keys and marks', keys: ['?', '⌘/'], run: openHelp },
-  { id: 'filter', section: 'General', title: 'Filter pull requests', keys: ['/', '⌘f'], run: () => { dom.filter.focus(); dom.filter.select(); const box = dom.filter.closest<HTMLElement>('.search'); if (box != null) flash(box); } },
+  { id: 'filter', section: 'General', title: 'Filter pull requests', keys: ['/', '⌘f'], run: () => { const input = dom.team.hidden ? dom.filter : dom.teamFilter; input.focus(); input.select(); const box = input.closest<HTMLElement>('.search'); if (box != null) flash(box); } },
   { id: 'refresh', allowWhileTyping: true, section: 'General', title: 'Refresh', keys: ['r', '⌘r'], run: manualRefresh },
 
   { id: 'smart-all', section: 'Filter', title: 'Show all', aliases: 'clear filter', keys: ['⌥0'], run: () => setSmartFilter('all') },
