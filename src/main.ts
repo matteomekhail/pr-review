@@ -1173,12 +1173,29 @@ dom.welcome.addEventListener('click', (event) => {
 /** Whose review the Team table is narrowed to; empty for everyone. */
 let teamPerson = '';
 
+let teamRenderKey = '';
+
+/** Rebuilt only when what it shows changed: the PRs, the filters, or the minute its times are counted in. */
 function renderTeam(): void {
-  dom.team.innerHTML = teamHtml(
-    { pulls: state.pulls, now: Date.now(), person: teamPerson, repo: state.repoFilter, selectedId: state.selectedId, updatedAt: fetchedAt('team') },
-    { status: statusIcon, bots: botMarks, escape: escapeHtml },
-  );
+  const now = Date.now();
+  const updatedAt = fetchedAt('team');
+  const key = [objectId(state.pulls), teamPerson, state.repoFilter, state.selectedId, updatedAt, Math.floor(now / 60_000)].join('|');
+  if (key === teamRenderKey) return;
+  teamRenderKey = key;
+  dom.team.innerHTML = teamHtml({ pulls: state.pulls, now, person: teamPerson, repo: state.repoFilter, selectedId: state.selectedId, updatedAt }, { status: statusIcon, bots: botMarks, escape: escapeHtml });
 }
+
+/** A PR's body and diff start loading when the pointer rests on its row, so opening it is instant. */
+let teamHoverTimer = 0;
+dom.team.addEventListener('pointerover', (event) => {
+  const pull = pullById((event.target as HTMLElement).closest<HTMLElement>('li[data-id]')?.dataset.id ?? '');
+  window.clearTimeout(teamHoverTimer);
+  if (pull == null) return;
+  teamHoverTimer = window.setTimeout(() => {
+    void loadDiff(pull).catch(() => undefined);
+    void loadBody(pull).catch(() => undefined);
+  }, 80);
+});
 
 dom.team.addEventListener('click', (event) => {
   const target = event.target as HTMLElement;
@@ -2438,12 +2455,16 @@ function teamRepos(): string[] {
   return [...counts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 10).map(([repo]) => repo);
 }
 
+/** Team searches the repositories of my queues, so on a first launch it waits for them. */
+async function fetchTeamSearch(expected: number): Promise<SearchResult> {
+  if (teamRepos().length === 0) await Promise.allSettled(SEARCH_KINDS.map((kind) => searchesInFlight.get(kind)));
+  const repos = teamRepos();
+  const since = new Date(Date.now() - TEAM_DAYS * 86_400_000).toISOString().slice(0, 10);
+  return repos.length === 0 ? { pulls: [], total: 0 } : fetchTeam(repos, since, expected);
+}
+
 function fetchSearch(key: string, expected: number): Promise<SearchResult> {
-  if (key === TEAM_KEY) {
-    const repos = teamRepos();
-    const since = new Date(Date.now() - TEAM_DAYS * 86_400_000).toISOString().slice(0, 10);
-    return repos.length === 0 ? Promise.resolve({ pulls: [], total: 0 }) : fetchTeam(repos, since, expected);
-  }
+  if (key === TEAM_KEY) return fetchTeamSearch(expected);
   if (key.startsWith(REVIEWS_PREFIX)) return fetchReviews(key);
   if (!key.startsWith(MERGED_PREFIX)) return fetchQueue(key as SearchKind, expected);
   const [period, author] = key.slice(MERGED_PREFIX.length).split(':') as [MergedPeriod, string];
@@ -2492,6 +2513,8 @@ function storeSearch(key: string, { pulls: fetched, total }: SearchResult): void
   searches.set(key, { at: Date.now(), pulls: pulls ?? previous?.pulls ?? [], total });
   publishQueues(QUEUE_KINDS.filter((queue) => searchesFor(queue).includes(key)));
   persistSearches();
+  // My queues name the team's repositories; fetch Team now so it is ready before it is opened.
+  if ((SEARCH_KINDS as readonly string[]).includes(key) && !searches.has(TEAM_KEY)) void refresh('team');
 }
 
 function searchPulls(key: string): PullRequest[] {
@@ -2508,7 +2531,7 @@ function fetchedAt(kind: QueueKind): number | undefined {
 function isInUse(kind: QueueKind): boolean {
   if (kind === 'merged') return state.kind === kind || searches.has(mergedKey());
   if (kind === 'reviews') return state.kind === kind || searches.has(reviewsKey());
-  if (kind === 'team') return state.kind === kind || searches.has(TEAM_KEY);
+  if (kind === 'team') return state.kind === kind || searches.has(TEAM_KEY) || teamRepos().length > 0;
   return true;
 }
 
@@ -2594,7 +2617,7 @@ function hydrateSearches(): void {
     viewerTeams = cached.teams == null ? null : new Set(cached.teams);
     Object.entries(cached.mergeStates).forEach(([id, entry]) => mergeStateCache.set(id, entry));
     for (const [key, entry] of Object.entries(cached.searches)) {
-      const isKnown = (SEARCH_KINDS as readonly string[]).includes(key) || key === mergedKey() || key === reviewsKey();
+      const isKnown = (SEARCH_KINDS as readonly string[]).includes(key) || key === mergedKey() || key === reviewsKey() || key === TEAM_KEY;
       // Caches from before labels were fetched hold none; the refresh at start fills them in.
       if (isKnown && Array.isArray(entry.pulls) && entry.pulls.every((pull) => pull.activity != null && Array.isArray(pull.failingChecks))) searches.set(key, { ...entry, pulls: entry.pulls.map((pull) => (Array.isArray(pull.labels) ? pull : { ...pull, labels: [] })) });
     }
@@ -3761,8 +3784,15 @@ syncPaneButtons();
 dom.approve.addEventListener('click', () => void approveSelected());
 dom.merge.addEventListener('click', () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()));
 /** Syncs every tab; searches they share are fetched once, and ones fetched in the last 20s are reused. */
+/** Team is fetched ahead so it opens at once, but only this often while another tab is showing. */
+const TEAM_BACKGROUND_MS = 5 * 60_000;
+
+function isDue(kind: QueueKind): boolean {
+  return kind !== 'team' || state.kind === 'team' || Date.now() - (fetchedAt(kind) ?? 0) >= TEAM_BACKGROUND_MS;
+}
+
 function syncAll(): void {
-  QUEUE_KINDS.filter(isInUse).forEach((kind) => void refresh(kind));
+  QUEUE_KINDS.filter((kind) => isInUse(kind) && isDue(kind)).forEach((kind) => void refresh(kind));
 }
 window.addEventListener('focus', syncAll);
 document.addEventListener('visibilitychange', () => {
