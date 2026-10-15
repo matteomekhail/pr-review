@@ -26,7 +26,7 @@ import { routeLinksToBrowser } from './external-links';
 import { isSemanticMatch, semanticMatches } from './semantic-search';
 import { VirtualList, type VirtualRow } from './virtual-list';
 import { invalidateConversation, loadConversation, loadThreads, type ConversationItem, type ReviewThread } from './conversation';
-import { isReady, isRecent, isSmall, matchesSmartFilter, sortPulls, type SmartFilter, type SortOrder } from './smart';
+import { isReady, isRecent, isSmall, matchesSmartFilter, RECENT_HOURS, SMALL_DIFF_LINES, sortPulls, type SmartFilter, type SortOrder } from './smart';
 import { assessReadiness, isReadinessAvailable, type ReadinessResult } from './readiness';
 import { computeTurn, type Turn } from './turn';
 import { describeAsk, inAskScope, isStaleRequest, reviewAsk, type AskScope, type ReviewAsk } from './request';
@@ -35,7 +35,7 @@ import { mergeSearch } from './sync';
 import { PopoverMenu, type MenuSection } from './menu';
 import { authorCounts, MERGED_PERIODS, mergedSince, type MergedPeriod } from './merged';
 import { lastReviewAt, reviewerCounts, reviewsSince } from './reviews';
-import { botReviews, describeBotReview } from './review-bots';
+import { botReviews, describeBotReview, REVIEW_BOTS } from './review-bots';
 
 interface State {
   kind: QueueKind;
@@ -79,6 +79,7 @@ const dom = {
   list: element<HTMLOListElement>('pr-list'),
   filter: element<HTMLInputElement>('filter'),
   viewTitle: element('view-title'),
+  welcome: element('welcome'),
   empty: element('empty'),
   pr: element('pr'),
   crumbs: element('crumbs'),
@@ -149,7 +150,7 @@ function storedLabels(): string[] {
 }
 
 const state: State = {
-  kind: 'mine',
+  kind: 'turn',
   pulls: [],
   filter: '',
   smartFilter: ((['all', 'ready', 'attention', 'waiting', 'small', 'recent', 'tested'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
@@ -485,6 +486,19 @@ const sortMenu = new PopoverMenu('Sort');
 const SMART_LABELS: Record<SmartFilter, string> = { all: 'All', ready: 'Ready', attention: 'Unready', waiting: 'Waiting', small: 'Small', recent: 'Recent', tested: 'Tested' };
 const SMART_KEYS: Partial<Record<SmartFilter, string>> = { all: '⌥0', ready: '⌥1', small: '⌥2', recent: '⌥3', attention: '⌥4', tested: '⌥5' };
 const ASK_LABELS: Record<AskScope, string> = { all: 'Me + team', me: 'Only me', team: 'Only team' };
+/** One plain line under each filter in the selector, so a first-time reader knows what it keeps. */
+const SMART_DESCRIPTIONS: Record<SmartFilter, string> = {
+  all: 'Everything in this view',
+  ready: 'Approved, checks green, no conflicts',
+  attention: 'Conflicts, failing checks or no approval',
+  waiting: 'The next move is someone else\'s',
+  small: `Up to ${SMALL_DIFF_LINES} lines changed`,
+  recent: `Updated in the last ${RECENT_HOURS / 24} days`,
+  tested: 'Jev found proof it was tested',
+};
+const ASK_DESCRIPTIONS: Record<AskScope, string> = { all: 'Asked of you or your teams', me: 'Asked of you by name', team: 'Asked of one of your teams' };
+/** Filters scored by Jev, which needs a TypeSafe key. */
+const NEEDS_KEY = 'Needs TypeSafe key';
 const SORT_LABELS: Record<SortOrder, string> = { smart: 'Smart', updated: 'Recently updated', size: 'Smallest first' };
 
 /** A person filter on Merged or Reviews: empty for everyone, `@me`, or a login. */
@@ -511,8 +525,9 @@ function renderSlice(): void {
   dom.sortButton.hidden = isHistory(state.kind);
   dom.groupButton.hidden = isHistory(state.kind);
   dom.fixButton.hidden = isHistory(state.kind);
-  dom.groupButton.setAttribute('aria-pressed', String(isGrouped));
-  dom.groupButton.dataset.tip = `${isGrouped ? 'Ungroup' : 'Group related work'}  ⇧T`;
+  dom.groupButton.setAttribute('aria-pressed', String(isGrouped && isAiEnabled));
+  dom.groupButton.setAttribute('aria-disabled', String(!isAiEnabled));
+  dom.groupButton.dataset.tip = isAiEnabled ? `${isGrouped ? 'Ungroup' : 'Group related work'}  ⇧T` : 'Group related work: needs a TypeSafe key';
   dom.labelButton.setAttribute('aria-pressed', String(state.labelFilter.length > 0));
   dom.labelButton.dataset.tip = `${state.labelFilter.length === 0 ? 'Filter by label' : `Labels: ${state.labelFilter.join(', ')}`}  ⇧L`;
   sliceMenu.refresh();
@@ -532,7 +547,7 @@ function requestSection(): MenuSection {
   const team = pulls.filter((pull) => askFor(pull)?.to === 'team').length;
   const counts: Record<AskScope, number> = { all: pulls.length, me: pulls.length - team, team };
   const hints: Record<AskScope, string> = { all: '', me: '⌥6', team: '⌥7' };
-  return { title: 'Requests', items: (['all', 'me', 'team'] as const).map((scope) => ({ label: ASK_LABELS[scope], count: String(counts[scope]), hint: hints[scope], checked: state.askScope === scope, run: () => setAskScope(scope, false) })) };
+  return { title: 'Requests', items: (['all', 'me', 'team'] as const).map((scope) => ({ label: ASK_LABELS[scope], description: ASK_DESCRIPTIONS[scope], count: String(counts[scope]), hint: hints[scope], checked: state.askScope === scope, run: () => setAskScope(scope, false) })) };
 }
 
 function showSection(): MenuSection {
@@ -547,7 +562,13 @@ function showSection(): MenuSection {
     recent: pulls.filter((pull) => isRecent(pull, now)).length,
     tested: pulls.filter(isTested).length,
   };
-  return { title: 'Show', items: (Object.keys(SMART_LABELS) as SmartFilter[]).map((filter) => ({ label: SMART_LABELS[filter], count: String(counts[filter]), hint: SMART_KEYS[filter], checked: state.smartFilter === filter, run: () => setSmartFilter(filter, false) })) };
+  return {
+    title: 'Show',
+    items: (Object.keys(SMART_LABELS) as SmartFilter[]).map((filter) => {
+      const isLocked = filter === 'tested' && !isAiEnabled;
+      return { label: SMART_LABELS[filter], description: isLocked ? NEEDS_KEY : SMART_DESCRIPTIONS[filter], isDisabled: isLocked, count: isLocked ? undefined : String(counts[filter]), hint: SMART_KEYS[filter], checked: state.smartFilter === filter, run: () => setSmartFilter(filter, false) };
+    }),
+  };
 }
 
 /** Repositories in the current tab, busiest first, counted within the label filter like every other section; the chosen one stays listed even when it has no PRs here. */
@@ -694,7 +715,7 @@ function setAskScope(scope: AskScope, isToggle = true): void {
   localStorage.setItem('askScope', state.askScope);
   renderList();
   const first = visiblePulls()[0];
-  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
+  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) autoSelect(first);
 }
 
 function setRepoFilter(repo: string): void {
@@ -702,7 +723,7 @@ function setRepoFilter(repo: string): void {
   localStorage.setItem('repoFilter', repo);
   renderList();
   const first = visiblePulls()[0];
-  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
+  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) autoSelect(first);
 }
 
 function toggleLabel(label: string): void {
@@ -715,7 +736,7 @@ function setLabelFilter(labels: string[]): void {
   localStorage.setItem('labelFilter', JSON.stringify(labels));
   renderList();
   const first = visiblePulls()[0];
-  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
+  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) autoSelect(first);
 }
 
 let pullIndexSource: PullRequest[] | null = null;
@@ -748,23 +769,6 @@ function statusIcon(pull: PullRequest): string {
   const status = prStatus(pull);
   const label = status.tone === 'queued' ? queueLabel(pull) : status.blocker != null ? describeBlockers(pull).join(' · ') : status.label;
   return `<span class="status ${status.tone}${status.blocker != null ? ` ${BLOCKER_GLYPHS[status.blocker]}` : ''}" title="${escapeHtml(label)}"></span>`;
-}
-
-function checksIcon(pull: PullRequest): string {
-  switch (pull.checkState) {
-    case 'SUCCESS':
-      return `<span class="check ok" title="Checks passed">${icon('check')}</span>`;
-    case 'FAILURE':
-    case 'ERROR':
-      return `<span class="check bad" title="${escapeHtml(pull.failingChecks.length === 0 ? 'Checks failed' : `Failing: ${describeFailingChecks(pull)}`)}">${icon('x')}</span>`;
-    case 'PENDING':
-    case 'EXPECTED':
-      return `<span class="check wait" title="Checks running">${icon('circleDashed')}</span>`;
-    case null:
-      return '';
-    default:
-      return pull.checkState satisfies never;
-  }
 }
 
 function readinessOf(pull: PullRequest): { percent: number; tone: 'ok' | 'wait' | 'bad'; reason: string } | null {
@@ -869,7 +873,7 @@ async function ensureGroups(isUserInitiated = false): Promise<void> {
 
 function toggleGrouping(): void {
   if (!isAiEnabled) {
-    toast('Grouping needs TYPESAFE_API_KEY.', true);
+    toast('Grouping needs a TypeSafe key (TYPESAFE_API_KEY).', true);
     return;
   }
   isGrouped = !isGrouped;
@@ -977,7 +981,7 @@ function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: str
         <span class="lead">${statusIcon(pull)}<span class="check-box" data-check="${pull.id}" role="checkbox" aria-checked="${isChecked}" title="Select  E / ⇧V"></span></span>
         <span class="row-main">
           <span class="row-top"><span class="t">${escapeHtml(pull.title)}</span>${readinessBadge(pull)}${turnMarker(pull)}${ageLabel(pull)}</span>
-          <span class="row-meta">${repoTag(pull, primaryRepo)}<span class="author">${escapeHtml(pull.author?.login ?? 'ghost')}</span><span class="sep">·</span><span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">#${pull.number}</span><span class="sep">·</span><span class="delta">+${pull.additions.toLocaleString('en')} −${pull.deletions.toLocaleString('en')}</span>${pull.queueEntry == null ? '' : `<span class="sep">·</span><span class="queued-note" title="${escapeHtml(queueLabel(pull))}">Queued #${pull.queueEntry.position + 1}</span>`}${checksIcon(pull)}<span class="grow"></span>${askTag(pull)}${botMarks(pull)}</span>
+          <span class="row-meta">${repoTag(pull, primaryRepo)}<span class="author">${escapeHtml(pull.author?.login ?? 'ghost')}</span><span class="sep">·</span><span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">#${pull.number}</span><span class="sep">·</span><span class="delta">+${pull.additions.toLocaleString('en')} −${pull.deletions.toLocaleString('en')}</span>${pull.queueEntry == null ? '' : `<span class="sep">·</span><span class="queued-note" title="${escapeHtml(queueLabel(pull))}">Queued #${pull.queueEntry.position + 1}</span>`}<span class="grow"></span>${askTag(pull)}${botMarks(pull)}</span>
         </span>
       </li>`;
 }
@@ -1045,20 +1049,148 @@ function isMergeStateSettled(pull: PullRequest): boolean {
   return pull.isDraft || pull.mergeStateStatus !== 'UNKNOWN';
 }
 
+const WELCOME_KEY = 'welcomeDismissed';
+/** First launch only: the detail pane explains a row and the keys instead of opening a PR. */
+let isWelcomeOpen = localStorage.getItem(WELCOME_KEY) !== '1';
+/** Whether the TypeSafe key check has answered, so the welcome note does not flash in and out. */
+let isAiKnown = false;
+
+/** The marks the welcome row points at; a mark the sample row lacks is skipped. */
+const WELCOME_CALLOUTS: readonly { selector: string; label: string; side: 'top' | 'bottom' }[] = [
+  { selector: '.lead .status', label: 'Status', side: 'top' },
+  { selector: '.turn.mine', label: 'Your turn', side: 'top' },
+  { selector: '.ask-tag', label: 'Asked to review', side: 'bottom' },
+  { selector: '.bot-marks', label: 'AI reviewers', side: 'bottom' },
+];
+
+const CALLOUT_TIER_PX = 18;
+
+/** How many of the welcome's marks a row shows, so the sample row is the one that explains the most. */
+function sampleScore(pull: PullRequest): number {
+  const turn = turnFor(pull)?.whose === 'mine' ? 1 : 0;
+  const ask = askFor(pull)?.to === 'me' ? 1 : 0;
+  const bots = botReviews(pull).filter((review) => review != null).length;
+  return turn + ask + bots;
+}
+
+function samplePull(pulls: readonly PullRequest[]): PullRequest | undefined {
+  return pulls.reduce<PullRequest | undefined>((best, pull) => (best == null || sampleScore(pull) > sampleScore(best) ? pull : best), undefined);
+}
+
+/** A real list row, inert, with its own copy of the markup so nothing else finds it as a list item. */
+function sampleRowHtml(pull: PullRequest): string {
+  return rowHtml(pull, mostCommonRepo(), '').replace(/ data-(key|check)="[^"]*"/g, '').replace(/ title="[^"]*"/g, '');
+}
+
+function welcomeNote(): string {
+  if (!isAiKnown || isAiEnabled) return '';
+  return 'Group and Tested need a TypeSafe key, so they are off. Set <code>TYPESAFE_API_KEY</code> in your shell profile or Keychain, then restart.';
+}
+
+function renderWelcome(): void {
+  const now = Date.now();
+  const turnPulls = (queueCache.get('turn') ?? []).filter((pull) => matchesFilters(pull, now, 'turn'));
+  const sample = samplePull(turnPulls) ?? samplePull(state.pulls);
+  const count = turnPulls.length;
+  const signature = [count, sample?.id, sample?.updatedAt, welcomeNote()].join('|');
+  if (dom.welcome.dataset.signature === signature) return;
+  dom.welcome.dataset.signature = signature;
+  const headline = count === 0 ? 'Nothing is your turn' : `Your turn: ${count} PR${count === 1 ? '' : 's'}`;
+  const keys: [string[], string][] = [[['j', 'k'], 'Next or previous PR'], [['a'], 'Approve'], [['⌘↵'], 'Merge'], [['?'], 'Every key and mark']];
+  dom.welcome.innerHTML = `<div class="welcome-inner">
+    <h1>${headline}</h1>
+    <p class="welcome-lede">Each one waits on you: a review, a reply or a merge.</p>
+    <div class="welcome-sample">${sample == null ? '' : `<ol class="row-sample">${sampleRowHtml(sample)}</ol>`}</div>
+    <dl class="welcome-keys">${keys.map(([combo, label]) => `<dt>${combo.map(renderShortcut).join('')}</dt><dd>${label}</dd>`).join('')}</dl>
+    <p class="welcome-note">${welcomeNote()}</p>
+    <button type="button" class="primary" id="welcome-dismiss">Got it</button>
+  </div>`;
+  const box = dom.welcome.querySelector<HTMLElement>('.welcome-sample');
+  if (box == null) return;
+  requestAnimationFrame(() => placeCallouts(box));
+  void document.fonts.ready.then(() => placeCallouts(box));
+}
+
+/** Labels each mark on the sample row with a hairline; a label that would collide moves out one tier. */
+function placeCallouts(box: HTMLElement): void {
+  box.querySelectorAll('.callout, .callout-line').forEach((node) => node.remove());
+  const row = box.querySelector('li');
+  if (row == null) return;
+  const origin = box.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const placed: { side: string; tier: number; left: number; right: number }[] = [];
+  for (const callout of WELCOME_CALLOUTS) {
+    const target = row.querySelector(callout.selector);
+    const rect = target?.getBoundingClientRect();
+    if (rect == null || rect.width === 0) continue;
+    const x = Math.round(rect.left + rect.width / 2 - origin.left);
+    const label = document.createElement('span');
+    label.className = 'callout';
+    label.textContent = callout.label;
+    box.append(label);
+    const width = label.offsetWidth;
+    const isRightAligned = x > (rowRect.width * 2) / 3;
+    const left = isRightAligned ? x - width + 1 : x;
+    let tier = 0;
+    while (placed.some((other) => other.side === callout.side && other.tier === tier && left < other.right + 12 && left + width > other.left - 12)) tier++;
+    placed.push({ side: callout.side, tier, left, right: left + width });
+    const rowTop = rowRect.top - origin.top;
+    const rowBottom = rowRect.bottom - origin.top;
+    const labelTop = callout.side === 'top' ? rowTop - 22 - tier * CALLOUT_TIER_PX : rowBottom + 8 + tier * CALLOUT_TIER_PX;
+    label.style.left = `${left}px`;
+    label.style.top = `${labelTop}px`;
+    const line = document.createElement('span');
+    line.className = 'callout-line';
+    const [from, to] = callout.side === 'top' ? [labelTop + 15, rect.top - origin.top - 2] : [rect.bottom - origin.top + 2, labelTop + 1];
+    line.style.left = `${x}px`;
+    line.style.top = `${from}px`;
+    line.style.height = `${Math.max(0, to - from)}px`;
+    box.append(line);
+  }
+}
+
+/** Opens a PR the user did not pick, unless the welcome panel holds the pane. */
+function autoSelect(pull: PullRequest): void {
+  if (!isWelcomeOpen) void select(pull);
+}
+
+function dismissWelcome(): void {
+  if (!isWelcomeOpen) return;
+  isWelcomeOpen = false;
+  localStorage.setItem(WELCOME_KEY, '1');
+  dom.welcome.hidden = true;
+}
+
+dom.welcome.addEventListener('click', (event) => {
+  if (!(event.target as HTMLElement).closest('#welcome-dismiss')) return;
+  dismissWelcome();
+  renderList();
+});
+
 function syncDetailVisibility(pulls: PullRequest[]): void {
   const hasSelection = selectedPull() != null;
   if (state.pulls.length > 0) document.getElementById('list-skeleton')?.remove();
   if (hasSelection) {
     clearBootSkeletons();
+    dom.welcome.hidden = true;
     dom.pr.hidden = false;
     dom.empty.hidden = true;
     return;
   }
+  if (isWelcomeOpen && (pulls.length > 0 || fetchedAt(state.kind) != null)) {
+    clearBootSkeletons();
+    dom.pr.hidden = true;
+    dom.empty.hidden = true;
+    dom.welcome.hidden = false;
+    renderWelcome();
+    return;
+  }
+  dom.welcome.hidden = true;
   const first = pulls[0];
   if (first != null) {
     cancelAnimationFrame(pendingAutoSelect);
     pendingAutoSelect = requestAnimationFrame(() => {
-      if (selectedPull() == null) void select(first);
+      if (selectedPull() == null) autoSelect(first);
     });
     return;
   }
@@ -1871,6 +2003,7 @@ let lastSelectAt = 0;
 const RAPID_SELECT_MS = 90;
 
 function select(pull: PullRequest): Promise<void> {
+  dismissWelcome();
   const previousId = state.selectedId;
   state.selectedId = pull.id;
   if (previousId != null && previousId !== pull.id && leaving.has(previousId)) scheduleLeave(previousId);
@@ -1923,6 +2056,7 @@ async function renderSelection(pull: PullRequest): Promise<void> {
   cancelFullFilePrefetch();
   resetScrollForNewPull(pull);
   dom.empty.hidden = true;
+  dom.welcome.hidden = true;
   dom.pr.hidden = false;
   currentFiles = [];
   diffView.show([]);
@@ -2144,7 +2278,7 @@ function applyMergeStates(states: MergeState[]): void {
     renderList();
     if (selectedPull() == null) {
       const first = visiblePulls()[0];
-      if (first != null) void select(first);
+      if (first != null) autoSelect(first);
     }
     const pull = selectedPull();
     if (pull != null) renderDetailMeta(pull);
@@ -2564,7 +2698,7 @@ function applyQueue(pulls: PullRequest[]): void {
     return;
   }
   const first = visiblePulls()[0];
-  if (first != null) void select(first);
+  if (first != null) autoSelect(first);
 }
 
 function switchKind(kind: QueueKind): void {
@@ -2578,7 +2712,7 @@ function switchKind(kind: QueueKind): void {
   state.pulls = queueCache.get(kind) ?? [];
   renderList();
   const first = visiblePulls()[0];
-  if (first != null) void select(first);
+  if (first != null) autoSelect(first);
   void scoreWithJev(state.pulls);
   renderRefreshStatus();
   groupsSignature = '';
@@ -2709,7 +2843,7 @@ function setSmartFilter(filter: SmartFilter, isToggle = true): void {
   localStorage.setItem('smartFilter', state.smartFilter);
   renderList();
   const first = visiblePulls()[0];
-  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
+  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) autoSelect(first);
 }
 
 function setSortOrder(order: SortOrder): void {
@@ -3270,9 +3404,30 @@ function syncPaneButtons(): void {
   }
 }
 
+/** Every mark a row can show, with the real row markup, so the legend never drifts from the list. */
+function legendHtml(): string {
+  const bot = (index: number, verdict: string): string => `<span class="bot-mark ${verdict}"><img src="${REVIEW_BOTS[index]?.avatarUrl ?? ''}&s=32" alt="" /></span>`;
+  const items: [string, string][] = [
+    ['<span class="status approved"></span>', 'Approved'],
+    ['<span class="status pending"></span>', 'Not approved yet'],
+    ['<span class="status blocked conflicts"></span><span class="status blocked changes"></span><span class="status blocked checks"></span><span class="status blocked rules"></span>', 'Blocked: conflicts, changes requested, failing checks, branch rules'],
+    ['<span class="status draft"></span>', 'Draft'],
+    ['<span class="status queued"></span>', 'In the merge queue'],
+    ['<span class="turn mine"></span>', 'Your turn: the next move is yours'],
+    [`<span class="turn theirs">${icon('hourglass')}</span>`, 'Waiting on someone else'],
+    [`<span class="ask-tag me">${icon('user')}<span>You</span></span>`, 'You were asked to review'],
+    [`<span class="ask-tag team">${icon('users')}</span>`, 'Your team was asked to review'],
+    [`<span class="bot-marks">${bot(0, 'approved')}${bot(1, 'changes')}</span>`, 'AI reviewers, Claude then Greptile. The dot is the verdict'],
+    ['<span class="queued-note">Queued #1</span>', 'Place in the merge queue'],
+    ['<span class="repo-tag">api</span>', 'Repository, when it is not your main one'],
+    ['<span class="delta">+84 −21</span>', 'Lines added and removed'],
+  ];
+  return `<h4>Marks on a row</h4><div class="legend row-sample">${items.map(([glyph, label]) => `<div class="legend-item"><span class="row-meta legend-glyph">${glyph}</span><span>${label}</span></div>`).join('')}</div>`;
+}
+
 function openHelp(): void {
   let section = '';
-  dom.shortcutList.innerHTML = commands
+  dom.shortcutList.innerHTML = legendHtml() + commands
     .list()
     .map((command) => {
       const heading = command.section !== section ? `<h4>${(section = command.section)}</h4>` : '';
@@ -3294,7 +3449,7 @@ const DIFF_SCROLL_COMMANDS: Command[] = [
 
 const COMMANDS: Command[] = [
   { id: 'update', section: 'General', title: 'Check for updates / restart into update', aliases: 'upgrade version release', keys: ['⌘⇧u'], run: () => (restartIntoUpdate != null ? restartIntoUpdate() : (toast('Checking for updates…'), checkForUpdates())) },
-  { id: 'help', section: 'General', title: 'Keyboard shortcuts', keys: ['?', '⌘/'], run: openHelp },
+  { id: 'help', section: 'General', title: 'Keys and marks', keys: ['?', '⌘/'], run: openHelp },
   { id: 'filter', section: 'General', title: 'Filter pull requests', keys: ['/', '⌘f'], run: () => { dom.filter.focus(); dom.filter.select(); const box = dom.filter.closest<HTMLElement>('.search'); if (box != null) flash(box); } },
   { id: 'refresh', allowWhileTyping: true, section: 'General', title: 'Refresh', keys: ['r', '⌘r'], run: manualRefresh },
 
@@ -3302,7 +3457,7 @@ const COMMANDS: Command[] = [
   { id: 'smart-ready', section: 'Filter', title: 'Show ready to merge', aliases: 'green approved mergeable', keys: ['⌥1'], run: () => setSmartFilter('ready') },
   { id: 'smart-small', section: 'Filter', title: 'Show small diffs', aliases: 'tiny quick', keys: ['⌥2'], run: () => setSmartFilter('small') },
   { id: 'smart-recent', section: 'Filter', title: 'Show recently updated', aliases: 'new fresh', keys: ['⌥3'], run: () => setSmartFilter('recent') },
-  { id: 'smart-tested', section: 'Filter', title: 'Show end-to-end tested', aliases: 'e2e verified qa proof screenshots recording', keys: ['⌥5'], run: () => setSmartFilter('tested') },
+  { id: 'smart-tested', section: 'Filter', title: 'Show end-to-end tested (needs TypeSafe key)', aliases: 'e2e verified qa proof screenshots recording', keys: ['⌥5'], run: () => (isAiEnabled ? setSmartFilter('tested') : toast('Tested needs a TypeSafe key (TYPESAFE_API_KEY).', true)) },
   { id: 'ask-me', section: 'Filter', title: 'Only me: hide PRs here only because my team was asked', aliases: 'direct personal mine review requests scope', keys: ['⌥6'], run: () => setAskScope('me') },
   { id: 'ask-team', section: 'Filter', title: 'Only team: review requests to my teams', aliases: 'team group codeowners engineering scope', keys: ['⌥7'], run: () => setAskScope('team') },
   { id: 'smart-attention', section: 'Filter', title: 'Show PRs that need attention', aliases: 'unapproved conflicts failing blocked red yellow triage', keys: ['⌥4'], run: () => setSmartFilter('attention') },
@@ -3322,10 +3477,10 @@ const COMMANDS: Command[] = [
   { id: 'check-clear', section: 'Select', title: 'Clear selection', keys: ['esc', '⌫'], run: clearChecked, isEnabled: () => state.checkedIds.size > 0 },
   { id: 'bulk-approve', section: 'Select', title: 'Approve selected', aliases: 'bulk lgtm', keys: ['⇧a'], run: () => void bulkApprove(), isEnabled: () => state.checkedIds.size > 0 },
 
-  { id: 'view-turn', section: 'Views', title: 'Go to My turn', keys: ['⌘4', 'g t'], run: () => switchKind('turn') },
-  { id: 'view-review', section: 'Views', title: 'Go to Review requested', keys: ['⌘1', 'g r'], run: () => switchKind('review') },
-  { id: 'view-involved', section: 'Views', title: 'Go to Involved', keys: ['⌘2', 'g i'], run: () => switchKind('involved') },
-  { id: 'view-mine', section: 'Views', title: 'Go to Created by me', keys: ['⌘3', 'g m'], run: () => switchKind('mine') },
+  { id: 'view-turn', section: 'Views', title: 'Go to My turn', keys: ['⌘1', 'g t'], run: () => switchKind('turn') },
+  { id: 'view-review', section: 'Views', title: 'Go to Review requested', keys: ['⌘2', 'g r'], run: () => switchKind('review') },
+  { id: 'view-mine', section: 'Views', title: 'Go to Mine (created by me)', keys: ['⌘3', 'g m'], run: () => switchKind('mine') },
+  { id: 'view-involved', section: 'Views', title: 'Go to Involved', keys: ['⌘4', 'g i'], run: () => switchKind('involved') },
   { id: 'view-approved', section: 'Views', title: 'Go to Approved by me', keys: ['⌘5', 'g a'], run: () => switchKind('approved') },
   { id: 'view-merged', section: 'Views', title: 'Go to Merged', aliases: 'history shipped done closed', keys: ['⌘6', 'g d'], run: () => switchKind('merged') },
   { id: 'view-reviews', section: 'Views', title: 'Go to Reviews', aliases: 'reviewers leaderboard who reviewed most stats', keys: ['⌘7', 'g v'], run: () => switchKind('reviews') },
@@ -3361,7 +3516,7 @@ const COMMANDS: Command[] = [
   { id: 'approve', section: 'Pull request', title: 'Approve', aliases: 'lgtm review accept', keys: ['a'], run: () => void approveSelected(), isEnabled: () => { const pull = selectedPull(); return pull != null && !isOwnPull(pull); } },
   { id: 'finish-review', section: 'Pull request', title: 'Finish review: publish pending comments with Comment, Approve or Request changes', aliases: 'submit review pending verdict request changes', keys: ['⌘⇧↵'], run: openReviewDialog, isEnabled: hasPull },
   { id: 'merge', section: 'Pull request', title: 'Merge (all selected when several are checked)', aliases: 'squash ship land queue', keys: ['⌘↵', 'm'], run: () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()), isEnabled: () => hasPull() || state.checkedIds.size > 0 },
-  { id: 'fix-prompt', section: 'Pull request', title: 'Needs attention → copy agent prompt', aliases: 'triage unapproved broken red failing ci conflict agent claude codex prompt clipboard review', keys: ['⇧x'], run: openTriage },
+  { id: 'fix-prompt', section: 'Pull request', title: 'Fix prompt: copy a prompt for an agent to fix unready PRs', aliases: 'triage unapproved broken red failing ci conflict agent claude codex prompt clipboard review', keys: ['⇧x'], run: openTriage },
   { id: 'open', section: 'Pull request', title: 'Open on GitHub', aliases: 'browser link url web', keys: ['o', '⌘o', 'g o'], run: openSelectedOnGitHub, isEnabled: hasPull },
   { id: 'copy-url', section: 'Pull request', title: 'Copy link', keys: ['⌘⇧c', 'y'], run: () => { const pull = selectedPull(); if (pull != null) copyText(pull.url, 'link'); }, isEnabled: hasPull },
   { id: 'copy-branch', section: 'Pull request', title: 'Copy branch name', keys: ['⌘⇧.', 'b'], run: () => { const pull = selectedPull(); if (pull != null) copyText(pull.headRefName, 'branch'); }, isEnabled: hasPull },
@@ -3495,6 +3650,7 @@ dom.sliceButton.addEventListener('click', openSliceMenu);
 dom.groupButton.addEventListener('click', toggleGrouping);
 dom.fixButton.addEventListener('click', openTriage);
 dom.labelButton.addEventListener('click', openLabelMenu);
+element('help-button').addEventListener('click', openHelp);
 element('expand-cancel').addEventListener('click', () => dom.expandDialog.close('cancel'));
 dom.expandDialog.addEventListener('close', () => {
   if (dom.expandDialog.returnValue !== 'ok') return;
@@ -3521,7 +3677,6 @@ element('list-empty').addEventListener('click', (event) => {
 document.querySelectorAll<HTMLElement>('.h-scroll').forEach(attachScrollFade);
 animateDialogCancel();
 watchKbdGlyphs();
-element('theme-button').addEventListener('click', openThemePicker);
 refreshTicker = window.setInterval(renderRefreshStatus, 5_000);
 void refreshTicker;
 dom.crumbs.addEventListener('click', (event) => {
@@ -3571,6 +3726,9 @@ void fetchViewerLogin().then((login) => {
 
 void isReadinessAvailable().then((isAvailable) => {
   isAiEnabled = isAvailable;
+  isAiKnown = true;
+  if (isWelcomeOpen && !dom.welcome.hidden) renderWelcome();
+  renderSlice();
   if (isAvailable) void scoreWithJev(state.pulls);
   if (isAvailable) void ensureGroups();
 });

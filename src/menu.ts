@@ -6,6 +6,10 @@ export interface MenuItem {
   count?: string;
   hint?: string;
   checked?: boolean;
+  /** One plain line under the label saying what the choice shows. */
+  description?: string;
+  /** Shown but not pickable; the description says why. */
+  isDisabled?: boolean;
   run: () => void;
 }
 
@@ -122,7 +126,9 @@ export class PopoverMenu {
         const items = section.items.map((item) => {
           const position = index++;
           const count = item.count == null ? '' : `<span class="menu-count">${escapeHtml(item.count)}</span>`;
-          return `<button type="button" role="${role}" tabindex="-1" aria-checked="${item.checked === true}" class="menu-item${item.checked === true ? ' checked' : ''}" data-index="${position}"><span class="menu-check">${item.checked === true ? icon('check') : ''}</span><span class="menu-label">${escapeHtml(item.label)}</span>${count}<span class="menu-hint">${escapeHtml(item.hint ?? '')}</span></button>`;
+          const description = item.description == null ? '' : `<span class="menu-description">${escapeHtml(item.description)}</span>`;
+          const classes = `menu-item${item.checked === true ? ' checked' : ''}${item.description == null ? '' : ' described'}${item.isDisabled === true ? ' disabled' : ''}`;
+          return `<button type="button" role="${role}" tabindex="-1" aria-checked="${item.checked === true}" aria-disabled="${item.isDisabled === true}" class="${classes}" data-index="${position}"><span class="menu-check">${item.checked === true ? icon('check') : ''}</span><span class="menu-label">${escapeHtml(item.label)}</span>${count}<span class="menu-hint">${escapeHtml(item.hint ?? '')}</span>${description}</button>`;
         });
         return `${title}${items.join('')}`;
       })
@@ -144,7 +150,7 @@ export class PopoverMenu {
 
   private pick(index: number): void {
     const item = this.items[index];
-    if (item == null) return;
+    if (item == null || item.isDisabled === true) return;
     this.setActive(index);
     item.run();
     this.refresh();
