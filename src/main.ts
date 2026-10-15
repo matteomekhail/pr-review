@@ -2184,7 +2184,7 @@ function toggleCurrentFile(): void {
   if (file != null) diffView.toggle(file.id);
 }
 
-/** Merge state, kept while the PR, its code and its checks stay as they were. */
+/** Last known merge state per PR. `key` says whether it is current: a stale one is fetched again but still shown meanwhile. */
 const mergeStateCache = new Map<string, { key: string; state: MergeState }>();
 
 function mergeKey(pull: PullRequest): string {
@@ -2249,19 +2249,21 @@ async function scoreWithJev(pulls: PullRequest[]): Promise<void> {
 }
 let mergeStateRenderFrame = 0;
 
+/** Searches return every PR as UNKNOWN; showing the last known state until a fresh one lands keeps rows from flickering on each sync. */
 function withMergeState(pull: PullRequest): PullRequest {
   const cached = mergeStateCache.get(pull.id);
-  return cached?.key === mergeKey(pull) ? { ...pull, mergeable: cached.state.mergeable, mergeStateStatus: cached.state.mergeStateStatus } : pull;
+  return cached == null ? pull : { ...pull, mergeable: cached.state.mergeable, mergeStateStatus: cached.state.mergeStateStatus };
 }
 
 /** Merge states land in every tab holding the PR, since tabs share searches. */
 function applyMergeStates(states: MergeState[]): void {
   invalidateList();
-  const byId = new Map(states.map((mergeState) => [mergeState.id, mergeState]));
+  // GitHub often answers UNKNOWN while it recomputes; that never replaces a state already shown.
+  const byId = new Map(states.filter((mergeState) => mergeState.mergeStateStatus !== 'UNKNOWN').map((mergeState) => [mergeState.id, mergeState]));
   const keyById = new Map([...queueCache.values()].flat().map((pull) => [pull.id, mergeKey(pull)]));
-  for (const mergeState of states) {
+  for (const mergeState of byId.values()) {
     const key = keyById.get(mergeState.id);
-    if (key != null && mergeState.mergeStateStatus !== 'UNKNOWN') mergeStateCache.set(mergeState.id, { key, state: mergeState });
+    if (key != null) mergeStateCache.set(mergeState.id, { key, state: mergeState });
   }
   for (const [kind, pulls] of queueCache) {
     if (!pulls.some((pull) => byId.has(pull.id))) continue;
