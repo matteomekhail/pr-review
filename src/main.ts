@@ -8,7 +8,7 @@ import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, de
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, commentOnLines, commentOnPull, replyToThread, resolveThread, submitReview, type ReviewCommentInput, type ReviewEvent, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, fetchReviewed, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
+import { approvePull, commentOnLines, commentOnPull, replyToThread, resolveThread, submitReview, type ReviewCommentInput, type ReviewEvent, fetchViewerLogin, fetchViewerTeams, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchMerged, fetchPulls, fetchQueue, fetchReviewed, fetchTeam, type MergeState, type SearchResult, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind, type SearchKind } from './github';
 import type { SelectedLineRange } from '@pierre/diffs';
 import { DiffView, parseDiff, type AnnotationRef, type DiffAnnotation, type DiffStyle, type ExpandLines, type ParsedFile } from './diffs';
 import { composerHtml, pendingHtml, replyRowHtml, threadHtml } from './inline-comments';
@@ -36,6 +36,7 @@ import { PopoverMenu, type MenuSection } from './menu';
 import { authorCounts, MERGED_PERIODS, mergedSince, type MergedPeriod } from './merged';
 import { lastReviewAt, reviewerCounts, reviewsSince } from './reviews';
 import { botReviews, describeBotReview, REVIEW_BOTS } from './review-bots';
+import { teamHtml } from './team';
 
 interface State {
   kind: QueueKind;
@@ -64,7 +65,7 @@ const PREFETCH_AHEAD = 5;
 const DIFF_CACHE_LIMIT = 24;
 /** Every tab syncs this often while the window is visible; a sync that finds nothing new leaves the screen alone. */
 const SYNC_INTERVAL_MS = 60_000;
-const VIEW_TITLES: Record<QueueKind, string> = { turn: 'My turn', review: 'Review', involved: 'Involved', mine: 'Mine', approved: 'Approved', merged: 'Merged', reviews: 'Reviews' };
+const VIEW_TITLES: Record<QueueKind, string> = { turn: 'My turn', review: 'Review', involved: 'Involved', mine: 'Mine', approved: 'Approved', merged: 'Merged', reviews: 'Reviews', team: 'Team' };
 const MERGE_LABELS: Record<MergeMethod, string> = { squash: 'Squash and merge', merge: 'Merge', rebase: 'Rebase and merge' };
 
 const element = <T extends HTMLElement>(id: string): T => {
@@ -76,10 +77,12 @@ const element = <T extends HTMLElement>(id: string): T => {
 hydrateIcons();
 
 const dom = {
+  app: element('app'),
   list: element<HTMLOListElement>('pr-list'),
   filter: element<HTMLInputElement>('filter'),
   viewTitle: element('view-title'),
   welcome: element('welcome'),
+  team: element('team'),
   empty: element('empty'),
   pr: element('pr'),
   crumbs: element('crumbs'),
@@ -421,7 +424,7 @@ function isOpen(pull: PullRequest): boolean {
 
 /** My own PRs, and ones I already approved, have no open requests to scope, so the menu neither shows nor applies there. */
 function hasAskScope(kind: QueueKind): boolean {
-  return kind !== 'mine' && kind !== 'approved' && !isHistory(kind);
+  return kind !== 'mine' && kind !== 'approved' && kind !== 'team' && !isHistory(kind);
 }
 
 function matchesAskScope(pull: PullRequest, kind: QueueKind): boolean {
@@ -1151,7 +1154,7 @@ function placeCallouts(box: HTMLElement): void {
 
 /** Opens a PR the user did not pick, unless the welcome panel holds the pane. */
 function autoSelect(pull: PullRequest): void {
-  if (!isWelcomeOpen) void select(pull);
+  if (!isWelcomeOpen && state.kind !== 'team') void select(pull);
 }
 
 function dismissWelcome(): void {
@@ -1167,9 +1170,43 @@ dom.welcome.addEventListener('click', (event) => {
   renderList();
 });
 
+/** Whose review the Team table is narrowed to; empty for everyone. */
+let teamPerson = '';
+
+function renderTeam(): void {
+  dom.team.innerHTML = teamHtml(
+    { pulls: state.pulls, now: Date.now(), person: teamPerson, repo: state.repoFilter, selectedId: state.selectedId, updatedAt: fetchedAt('team') },
+    { status: statusIcon, bots: botMarks, escape: escapeHtml },
+  );
+}
+
+dom.team.addEventListener('click', (event) => {
+  const target = event.target as HTMLElement;
+  const repo = target.closest<HTMLElement>('[data-repo]');
+  if (repo != null) return setRepoFilter(repo.dataset.repo ?? '');
+  const person = target.closest<HTMLElement>('[data-person]');
+  if (person != null) {
+    teamPerson = person.dataset.person === teamPerson ? '' : (person.dataset.person ?? '');
+    return renderTeam();
+  }
+  const pull = pullById(target.closest<HTMLElement>('[data-id]')?.dataset.id ?? '');
+  if (pull != null) void select(pull);
+});
+
 function syncDetailVisibility(pulls: PullRequest[]): void {
   const hasSelection = selectedPull() != null;
   if (state.pulls.length > 0) document.getElementById('list-skeleton')?.remove();
+  const isTeamHome = state.kind === 'team' && !hasSelection;
+  dom.app.classList.toggle('team-home', isTeamHome);
+  dom.team.hidden = !isTeamHome;
+  if (isTeamHome) {
+    clearBootSkeletons();
+    dom.welcome.hidden = true;
+    dom.pr.hidden = true;
+    dom.empty.hidden = true;
+    renderTeam();
+    return;
+  }
   if (hasSelection) {
     clearBootSkeletons();
     dom.welcome.hidden = true;
@@ -2006,6 +2043,8 @@ function select(pull: PullRequest): Promise<void> {
   dismissWelcome();
   const previousId = state.selectedId;
   state.selectedId = pull.id;
+  // Leaving the Team dashboard brings the list back before it scrolls to the PR.
+  if (state.kind === 'team' && previousId == null) syncDetailVisibility(filteredPulls());
   if (previousId != null && previousId !== pull.id && leaving.has(previousId)) scheduleLeave(previousId);
   state.activeFileIndex = -1;
   virtualList.scrollToKey(pull.id);
@@ -2313,8 +2352,12 @@ async function loadMergeStates(pulls: PullRequest[]): Promise<void> {
 }
 
 /** The searches behind each tab. A search shared by tabs is fetched once and feeds all of them. */
-const QUEUE_SEARCHES: Record<Exclude<QueueKind, 'merged' | 'reviews'>, readonly SearchKind[]> = { turn: ['review', 'mine', 'reviewed'], review: ['review'], mine: ['mine'], involved: ['involved'], approved: ['reviewed'] };
-const QUEUE_KINDS: readonly QueueKind[] = [...(Object.keys(QUEUE_SEARCHES) as QueueKind[]), 'merged', 'reviews'];
+const QUEUE_SEARCHES: Record<Exclude<QueueKind, 'merged' | 'reviews' | 'team'>, readonly SearchKind[]> = { turn: ['review', 'mine', 'reviewed'], review: ['review'], mine: ['mine'], involved: ['involved'], approved: ['reviewed'] };
+const QUEUE_KINDS: readonly QueueKind[] = [...(Object.keys(QUEUE_SEARCHES) as QueueKind[]), 'merged', 'reviews', 'team'];
+/** Everyone's open PRs in the repositories I work in. */
+const TEAM_KEY = 'team';
+/** PRs nobody touched in this long are left out of Team as abandoned. */
+const TEAM_DAYS = 30;
 const SEARCH_KINDS: readonly SearchKind[] = ['review', 'mine', 'involved', 'reviewed'];
 /** Searches outlive restarts, so the app opens on the last data it saw while it refreshes. */
 const SEARCH_CACHE_KEY = 'searchCache.v3';
@@ -2377,6 +2420,7 @@ function reviewedTitle(pull: PullRequest): string {
 function searchesFor(kind: QueueKind): readonly string[] {
   if (kind === 'merged') return [mergedKey()];
   if (kind === 'reviews') return [reviewsKey()];
+  if (kind === 'team') return [TEAM_KEY];
   return QUEUE_SEARCHES[kind];
 }
 
@@ -2387,7 +2431,19 @@ function mergedOrgs(): string[] {
   return [...new Set((fromTeams.length > 0 ? fromTeams : fromRepos).filter((org) => org !== ''))].slice(0, 10);
 }
 
+/** The repositories of my own queues, busiest first: where my team works. */
+function teamRepos(): string[] {
+  const counts = new Map<string, number>();
+  SEARCH_KINDS.flatMap((kind) => searchPulls(kind)).forEach((pull) => counts.set(pull.repository.nameWithOwner, (counts.get(pull.repository.nameWithOwner) ?? 0) + 1));
+  return [...counts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 10).map(([repo]) => repo);
+}
+
 function fetchSearch(key: string, expected: number): Promise<SearchResult> {
+  if (key === TEAM_KEY) {
+    const repos = teamRepos();
+    const since = new Date(Date.now() - TEAM_DAYS * 86_400_000).toISOString().slice(0, 10);
+    return repos.length === 0 ? Promise.resolve({ pulls: [], total: 0 }) : fetchTeam(repos, since, expected);
+  }
   if (key.startsWith(REVIEWS_PREFIX)) return fetchReviews(key);
   if (!key.startsWith(MERGED_PREFIX)) return fetchQueue(key as SearchKind, expected);
   const [period, author] = key.slice(MERGED_PREFIX.length).split(':') as [MergedPeriod, string];
@@ -2452,6 +2508,7 @@ function fetchedAt(kind: QueueKind): number | undefined {
 function isInUse(kind: QueueKind): boolean {
   if (kind === 'merged') return state.kind === kind || searches.has(mergedKey());
   if (kind === 'reviews') return state.kind === kind || searches.has(reviewsKey());
+  if (kind === 'team') return state.kind === kind || searches.has(TEAM_KEY);
   return true;
 }
 
@@ -2472,6 +2529,8 @@ function deriveQueue(kind: QueueKind): PullRequest[] {
       return searchPulls(mergedKey());
     case 'reviews':
       return reviewedPulls(searchPulls(reviewsKey()));
+    case 'team':
+      return searchPulls(TEAM_KEY);
     case 'turn': {
       const seen = new Set<string>();
       return [...requestedPulls(), ...searchPulls('mine'), ...searchPulls('reviewed')].filter((pull) => !seen.has(pull.id) && seen.add(pull.id) != null && turnFor(pull)?.whose === 'mine');
@@ -3485,6 +3544,7 @@ const COMMANDS: Command[] = [
   { id: 'view-involved', section: 'Views', title: 'Go to Involved', keys: ['⌘4', 'g i'], run: () => switchKind('involved') },
   { id: 'view-approved', section: 'Views', title: 'Go to Approved by me', keys: ['⌘5', 'g a'], run: () => switchKind('approved') },
   { id: 'view-merged', section: 'Views', title: 'Go to Merged', aliases: 'history shipped done closed', keys: ['⌘6', 'g d'], run: () => switchKind('merged') },
+  { id: 'view-team', section: 'Views', title: 'Go to Team', aliases: 'dashboard everyone stuck reviewers load overview', keys: ['⌘8', 'g e'], run: () => switchKind('team') },
   { id: 'view-reviews', section: 'Views', title: 'Go to Reviews', aliases: 'reviewers leaderboard who reviewed most stats', keys: ['⌘7', 'g v'], run: () => switchKind('reviews') },
 
   { id: 'toggle-sidebar', section: 'Layout', title: 'Toggle pull request list', aliases: 'hide show pane sidebar navigation queue inbox', keys: ['⌘b', '⌘\\'], run: () => layout.toggle('list') },

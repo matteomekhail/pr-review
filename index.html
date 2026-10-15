@@ -36,6 +36,7 @@
             <button data-kind="approved" title="Approved by me  ⌘5"><span class="rail-icon"><i data-icon="circleCheck"></i><span class="count" data-count="approved"></span></span><span class="rail-label">Approved</span></button>
             <button data-kind="merged" title="Merged, by period and author  ⌘6"><span class="rail-icon"><i data-icon="merge"></i></span><span class="rail-label">Merged</span></button>
             <button data-kind="reviews" title="Reviews, by period and reviewer  ⌘7"><span class="rail-icon"><i data-icon="userCheck"></i></span><span class="rail-label">Reviews</span></button>
+            <button data-kind="team" title="Team: everyone's open PRs, who holds them and for how long  ⌘8"><span class="rail-icon"><i data-icon="dashboard"></i><span class="count" data-count="team"></span></span><span class="rail-label">Team</span></button>
           </nav>
           <div class="list-column">
             <ol id="pr-list"></ol>
@@ -57,6 +58,7 @@
       <main id="detail">
         <div id="empty" class="empty is-loading" data-tauri-drag-region><div class="boot-skeleton" aria-label="Loading pull requests" aria-busy="true"></div></div>
         <section id="welcome" class="welcome" hidden></section>
+        <section id="team" class="team" hidden></section>
         <section id="pr" hidden>
           <header id="pr-head" class="drag-region" data-tauri-drag-region>
             <div class="head-left" data-tauri-drag-region>
