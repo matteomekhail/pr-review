@@ -6,6 +6,14 @@ export interface VirtualRow {
 
 const OVERSCAN_PX = 480;
 
+/** A rendered row: the HTML it was built from, and its classes then. Rows are edited in place only through their
+ * classes (selected, checked), so a changed class means the element no longer matches its HTML. */
+interface RenderedRow {
+  html: string;
+  className: string;
+  element: Element;
+}
+
 export class VirtualList {
   private rows: VirtualRow[] = [];
   private offsets: number[] = [0];
@@ -19,6 +27,8 @@ export class VirtualList {
   private highlightedKey: string | null = null;
   private highlightTop: number | null = null;
   private highlightHeight = -1;
+  private rendered = new Map<string, RenderedRow>();
+  private readonly template = document.createElement('template');
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -39,6 +49,8 @@ export class VirtualList {
 
   setRows(rows: VirtualRow[]): void {
     this.rows = rows;
+    const keys = new Set(rows.map((row) => row.key));
+    for (const key of this.rendered.keys()) if (!keys.has(key)) this.rendered.delete(key);
     this.offsets = [0];
     for (const row of rows) this.offsets.push((this.offsets.at(-1) ?? 0) + row.height);
     this.renderedRange = '';
@@ -136,6 +148,22 @@ export class VirtualList {
     this.renderedRange = range;
     this.spacerTop.style.height = `${this.offsets[start] ?? 0}px`;
     this.spacerBottom.style.height = `${Math.max(0, total - (this.offsets[end] ?? total))}px`;
-    this.window.innerHTML = this.rows.slice(start, end).map((row) => row.render()).join('');
+    const elements = this.rows.slice(start, end).map((row) => this.rowElement(row));
+    const current = this.window.children;
+    if (elements.length !== current.length || elements.some((element, index) => current[index] !== element)) this.window.replaceChildren(...elements);
+  }
+
+  /**
+   * Rows whose HTML did not change keep their element, so a sync that touches one PR does not rebuild the rest: their
+   * avatars and marks would otherwise reload and flicker. A row whose classes were edited in place since is rebuilt.
+   */
+  private rowElement(row: VirtualRow): Element {
+    const html = row.render();
+    const previous = this.rendered.get(row.key);
+    if (previous != null && previous.html === html && previous.element.className === previous.className) return previous.element;
+    this.template.innerHTML = html;
+    const element = this.template.content.firstElementChild ?? document.createElement('li');
+    this.rendered.set(row.key, { html, className: element.className, element });
+    return element;
   }
 }
