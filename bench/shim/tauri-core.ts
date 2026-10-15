@@ -47,6 +47,7 @@ function queueFor(kind: string): FixturePull[] {
 
 const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   queue: (args) => JSON.stringify([{ data: { search: { nodes: queueFor(args.kind as string) } } }]),
+  team: () => JSON.stringify([{ data: { search: { nodes: pulls } } }]),
   merge_states: (args) => JSON.stringify({ data: { nodes: (args.ids as string[]).map((id) => byId.get(id)).filter((pull) => pull != null).map((pull) => mergeStateOf(pull as FixturePull)) } }),
   body: (args) => {
     if (new URLSearchParams(location.search).has('failBodyOnce') && calls.body === 1) throw new Error('connection reset by peer');

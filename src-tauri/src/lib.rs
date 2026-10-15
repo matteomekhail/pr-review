@@ -272,6 +272,22 @@ async fn merged(since: String, orgs: Vec<String>, author: Option<String>, expect
     serde_json::to_string(&pages).map_err(|error| error.to_string())
 }
 
+/// Open, ready-for-review PRs in `repos` updated since `since` (ISO 8601): everyone's work, for the Team view.
+#[tauri::command]
+async fn team(repos: Vec<String>, since: String, expected: Option<u64>) -> Result<String, String> {
+    if repos.is_empty() || repos.len() > 10 || !is_search_date(&since) {
+        return Err("invalid team search".to_string());
+    }
+    repos.iter().try_for_each(|repo| validate_repo(repo))?;
+    let scope = repos.iter().map(|repo| format!("repo:{repo}")).collect::<Vec<_>>().join(" ");
+    let q = format!("is:pr is:open archived:false draft:false updated:>={since} {scope} sort:updated-desc");
+    let query = format!(
+        "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {QUEUE_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_FIELDS} }} }} }}"
+    );
+    let pages = search_pages(query, q, expected.unwrap_or(0), QUEUE_PAGE_SIZE).await?;
+    serde_json::to_string(&pages).map_err(|error| error.to_string())
+}
+
 async fn search_count(q: &str) -> Result<u64, String> {
     let page = search_page("query($q: String!) { search(query: $q, type: ISSUE, first: 0) { issueCount } }", q, None).await?;
     Ok(page["data"]["search"]["issueCount"].as_u64().unwrap_or(0))
@@ -797,7 +813,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, merged, reviewed, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, file_at, line_comment, reply_comment, review_threads, resolve_thread, submit_review, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, merged, team, reviewed, pulls, viewer, viewer_teams, comment, merge_queue, merge_states, conversation, body, diff, file_at, line_comment, reply_comment, review_threads, resolve_thread, submit_review, approve, merge, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }

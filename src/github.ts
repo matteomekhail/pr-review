@@ -5,7 +5,7 @@ import { decisionFromVerdicts } from './approval';
 /** A GitHub search behind a queue. */
 export type SearchKind = 'review' | 'mine' | 'involved' | 'reviewed';
 /** A tab: built from one or more searches (see QUEUE_SEARCHES in main.ts). */
-export type QueueKind = Exclude<SearchKind, 'reviewed'> | 'turn' | 'approved' | 'merged' | 'reviews';
+export type QueueKind = Exclude<SearchKind, 'reviewed'> | 'turn' | 'approved' | 'merged' | 'reviews' | 'team';
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
 export type MergeableState = 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
 export type CheckState = 'SUCCESS' | 'FAILURE' | 'ERROR' | 'PENDING' | 'EXPECTED';
@@ -198,6 +198,11 @@ export async function fetchQueue(kind: SearchKind, expected = 0): Promise<Search
 /** PRs merged since `since` in `orgs` (anything I was involved in when empty), by `author` when given (`@me` works). */
 export async function fetchMerged(since: string, orgs: readonly string[], author: string | null, expected = 0): Promise<SearchResult> {
   return parsePages(await invoke<string>('merged', { since, orgs, author, expected }));
+}
+
+/** Everyone's open, ready-for-review PRs in `repos` updated since `since` (ISO 8601). */
+export async function fetchTeam(repos: readonly string[], since: string, expected = 0): Promise<SearchResult> {
+  return parsePages(await invoke<string>('team', { repos, since, expected }));
 }
 
 /**
